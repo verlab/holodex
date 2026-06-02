@@ -24,6 +24,10 @@ O HoloDex explora cinemática holonômica em escala de laboratório, com ênfase
 
 Repositório em fase inicial — documentação e artefatos serão adicionados conforme o protótipo evoluir.
 
+## Contribuição
+
+Fluxo de branches, commits e PRs: [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## VerLab
 
 Projeto interno da [VerLab](https://github.com/verlab) — repositório privado.
