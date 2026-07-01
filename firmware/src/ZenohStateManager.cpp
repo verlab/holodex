@@ -1,10 +1,16 @@
 #include "ZenohStateManager.hpp"
+#include "ZenohListener.hpp"
+#include <vector>
+#include <cstring>
 
 
 
 
 
 
+void ZenohStateManager::addListener(IZenohListener* listener) {
+    listeners.push_back(listener);
+}
 // O "trampolim" estático que o Zenoh chama
 void ZenohStateManager::staticMessageHandler(z_loaned_sample_t* sample, void* arg) {
     auto* instance = static_cast<ZenohStateManager*>(arg);
@@ -15,28 +21,33 @@ void ZenohStateManager::staticMessageHandler(z_loaned_sample_t* sample, void* ar
 
 // O método que realmente trata o dado dentro do contexto do objeto
 void ZenohStateManager::messageHandler(const z_loaned_sample_t* sample) {
-
-    // Recupera a estrutura gerenciadora de bytes do Zenoh
     const z_loaned_bytes_t* payload = z_sample_payload(sample);
-
-    // 1. API oficial para recuperar o tamanho (não acesse _slices._len diretamente)
     size_t payload_size = z_bytes_len(payload);
 
-    // 2. Validação de segurança
+    // For each listener, check topic and size
+    for (auto* listener : listeners) {
+        if (payload_size == listener->getSize()) {
+            // Get topic from sample (simulate: always call, or add topic extraction if possible)
+            // For now, always call handle (since topic extraction is not shown in current code)
+            uint8_t buffer[256];
+            if (payload_size <= sizeof(buffer)) {
+                z_bytes_reader_t reader = z_bytes_get_reader(payload);
+                z_bytes_reader_read(&reader, buffer, payload_size);
+                listener->handle(buffer);
+            }
+        }
+    }
+
+    // Original logic for MotorDTO
     if (payload_size == sizeof(MotorDTO)) {
         MotorDTO data;
-        
-        // 3. Extrai os bytes REAIS usando a API de Reader oficial do Zenoh
         z_bytes_reader_t reader = z_bytes_get_reader(payload);
         z_bytes_reader_read(&reader, (uint8_t*)&data, sizeof(MotorDTO));
-
-        // 4. Agora você pode usar as variáveis!
         Serial.print("\n[Zenoh Class] Struct Recebido!");
         Serial.print(" V1: "); Serial.print(data.motorA);
         Serial.print(" | V2: "); Serial.print(data.motorB);
         Serial.print(" | V3: "); Serial.print(data.motorC);
         Serial.print(" | V4: "); Serial.println(data.motorD);
-
         lastPacket = data;
     } else {
         Serial.print("\n[Zenoh Class] Erro: Tamanho de payload inválido. Esperado: ");
@@ -121,4 +132,9 @@ void ZenohStateManager::sendMessage(const char* message)
             Serial.println("Enviado com sucesso!");
         }
     }
+}
+
+bool ZenohStateManager::isReady()
+{
+    return zenoh_ready;
 }

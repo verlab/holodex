@@ -1,9 +1,11 @@
 #pragma once
 #include <Arduino.h>
+#include <vector>
 
 extern "C" {
 #include <zenoh-pico.h>
 }
+#include "ZenohListener.hpp"
 
 
 struct MotorDTO
@@ -20,10 +22,15 @@ public:
     ZenohStateManager(const char* zenoh_router_endpoint);
     void sendMessage(const char* message);
 
+    bool isReady();
+
     int get_motorA() { return lastPacket.motorA; }
     int get_motorB() { return lastPacket.motorB; }
     int get_motorC() { return lastPacket.motorC; }
     int get_motorD() { return lastPacket.motorD; }
+
+public:
+    void addListener(IZenohListener* listener);
 
 private:
     // O Zenoh agora passa referências emprestadas (loaned) para os callbacks
@@ -31,6 +38,7 @@ private:
     void messageHandler(const z_loaned_sample_t* sample);
 
 private:
+    std::vector<IZenohListener*> listeners;
     z_owned_session_t session;
     z_owned_publisher_t pub;
     z_owned_subscriber_t sub;
