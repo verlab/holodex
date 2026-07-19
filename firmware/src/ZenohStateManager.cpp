@@ -1,7 +1,4 @@
 #include "ZenohStateManager.hpp"
-#include "ZenohListener.hpp"
-#include <vector>
-#include <cstring>
 
 
 
@@ -9,10 +6,36 @@
 
 
 void ZenohStateManager::addListener(IZenohListener* listener) {
-    listeners.push_back(listener);
+    z_view_keyexpr_t sub_ke;
+    z_view_keyexpr_from_str_unchecked(&sub_ke, listener->getTopic().c_str());
+
+    z_owned_closure_sample_t callback_closure;
+    z_closure_sample(&callback_closure, ZenohStateManager::staticMessageHandler, NULL, listener);
+
+    if (z_declare_subscriber(
+        z_session_loan(&session), 
+        &sub, 
+        z_view_keyexpr_loan(&sub_ke), 
+        z_closure_sample_move(&callback_closure), 
+        NULL
+    ) < 0) {
+        Serial.println("Erro ao declarar o subscriber!");
+        return;
+    }
+    
+    
 }
-// O "trampolim" estático que o Zenoh chama
-void ZenohStateManager::staticMessageHandler(z_loaned_sample_t* sample, void* arg) {
+
+void ZenohStateManager::staticMessageRouter(z_loaned_sample_t *sample, void *arg)
+{
+    auto* instance = static_cast<IZenohListener*>(arg);
+    if (instance) {
+        instance->handle(sample);
+    }
+}
+
+void ZenohStateManager::staticMessageHandler(z_loaned_sample_t *sample, void *arg)
+{
     auto* instance = static_cast<ZenohStateManager*>(arg);
     if (instance) {
         instance->messageHandler(sample);
@@ -24,21 +47,7 @@ void ZenohStateManager::messageHandler(const z_loaned_sample_t* sample) {
     const z_loaned_bytes_t* payload = z_sample_payload(sample);
     size_t payload_size = z_bytes_len(payload);
 
-    // For each listener, check topic and size
-    for (auto* listener : listeners) {
-        if (payload_size == listener->getSize()) {
-            // Get topic from sample (simulate: always call, or add topic extraction if possible)
-            // For now, always call handle (since topic extraction is not shown in current code)
-            uint8_t buffer[256];
-            if (payload_size <= sizeof(buffer)) {
-                z_bytes_reader_t reader = z_bytes_get_reader(payload);
-                z_bytes_reader_read(&reader, buffer, payload_size);
-                listener->handle(buffer);
-            }
-        }
-    }
-
-    // Original logic for MotorDTO
+    // Logic for MotorDTO
     if (payload_size == sizeof(MotorDTO)) {
         MotorDTO data;
         z_bytes_reader_t reader = z_bytes_get_reader(payload);
@@ -64,14 +73,14 @@ ZenohStateManager::ZenohStateManager(const char* zenoh_router_endpoint)
     lastPacket.motorC = 0;
     lastPacket.motorD = 0;
 
-    // 2. Inicialização da Configuração
+    // 1. Zenoh initial setup
     z_owned_config_t config;
     z_config_default(&config);
 
     zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, "client");
     zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, zenoh_router_endpoint);
 
-    // 4. Abrindo a sessão Zenoh
+    // 2. Opening zenoh session
     Serial.print("Abrindo sessao Zenoh...");
     if (z_open(&session, z_config_move(&config), NULL) < 0) {
         Serial.println(" Erro ao abrir a sessao!");
@@ -79,32 +88,30 @@ ZenohStateManager::ZenohStateManager(const char* zenoh_router_endpoint)
     }
     Serial.println(" Sucesso!");
 
-    // 5. Iniciar as tarefas de rede em background
+    // 3. Start processes
     if (zp_start_read_task(z_session_loan_mut(&session), NULL) < 0 || 
         zp_start_lease_task(z_session_loan_mut(&session), NULL) < 0) {
         Serial.println("Erro ao iniciar as tarefas de background!");
         return;
     }
 
-    // 6. Declarando a Key Expression (Tópico) do Publisher
+    // 4. Declaring pub topic
     z_view_keyexpr_t ke;
     z_view_keyexpr_from_str_unchecked(&ke, "demo/esp32");
     
-    // 7. Declarando o Publisher
+    // 5. Publisher declaration
     if (z_declare_publisher(z_session_loan(&session), &pub, z_view_keyexpr_loan(&ke), NULL) < 0) {
         Serial.println("Erro ao declarar o publisher!");
         return;
     }
 
-    // 8. Configurando o Subscriber
+    // 6. Internal subscriber config
     z_view_keyexpr_t sub_ke;
     z_view_keyexpr_from_str_unchecked(&sub_ke, "demo/pc_to_esp");
 
-    // CORREÇÃO DA CLOSURE: Instanciamos e configuramos o container da closure explicitamente
     z_owned_closure_sample_t callback_closure;
     z_closure_sample(&callback_closure, ZenohStateManager::staticMessageHandler, NULL, this);
 
-    // Registramos passando a closure movida via 'z_closure_sample_move'
     if (z_declare_subscriber(
         z_session_loan(&session), 
         &sub, 
