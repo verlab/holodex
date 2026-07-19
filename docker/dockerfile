@@ -1,0 +1,5 @@
+FROM eclipse/zenoh:latest
+
+EXPOSE 7447/tcp
+EXPOSE 7447/udp
+EXPOSE 8000/tcp
