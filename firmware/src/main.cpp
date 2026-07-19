@@ -94,7 +94,7 @@ void setup() {
 
 
     // Starting zenoh
-    zenoh = nullptr;//new ZenohStateManager(zenoh_router_endpoint);
+    zenoh = new ZenohStateManager(zenoh_router_endpoint);
 
     if(zenoh && zenoh->isReady() == false) {
         delete zenoh;
