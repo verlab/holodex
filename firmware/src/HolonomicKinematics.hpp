@@ -5,10 +5,7 @@
 #include <cmath>
 
 /**
- * Holonomic IK for 4× 45° omni wheels (port of cinematic.py + measured lx/ly).
- *
- * getDirection(dir_x, dir_y, rotation) convention (same as Qt):
- *   Web/Qt stick: getDirection(sy, sx, rot) with sy=forward, sx=right.
+ * Holonomic IK for 4× 45° omni wheels (measured lx/ly).
  *
  * Motor index / corner:
  *   M0 front-right  (+lx, −ly)  û = (−1,−1)/√2
@@ -16,10 +13,9 @@
  *   M2 front-left   (+lx, +ly)  û = (+1,−1)/√2
  *   M3 rear-left    (−lx, +ly)  û = (+1,+1)/√2
  *
- *   wheel_i = û · v + ω_n * (x û_y − y û_x) / R
- *
- * Pure yaw (ω only): all four wheels same sign & |Hz|.
- * Pure forward: M0=M1=−a, M2=M3=+a.
+ * On this chassis the Jacobian columns for strafe vs yaw are swapped vs the
+ * textbook û·v / ω×r assignment (confirmed on hardware): yaw uses û_y,
+ * strafe uses (x û_y − y û_x). Stick: forward→vx, yaw→omega→û_y, strafe→vy→ω×r.
  * motor_sign is applied in MotionController (not here).
  */
 class HolonomicKinematics {
@@ -31,13 +27,14 @@ public:
         rebuild();
     }
 
-    void inverseNormalized(float dir_x, float dir_y, float rotation, float step_hz_out[4]) const {
+    /** dir_x=forward, yaw_n=CCW yaw, strafe_n=strafe-right (normalized sticks). */
+    void inverseNormalized(float dir_x, float yaw_n, float strafe_n, float step_hz_out[4]) const {
         float raw[4];
         float peak = 1e-9f;
         for (int i = 0; i < 4; ++i) {
-            const float transl = dir_x * ux_[i] + dir_y * uy_[i];
-            const float rot = rotation * (x_[i] * uy_[i] - y_[i] * ux_[i]) * inv_r_;
-            raw[i] = transl + rot;
+            const float yaw = yaw_n * uy_[i];
+            const float strafe = strafe_n * (x_[i] * uy_[i] - y_[i] * ux_[i]) * inv_r_;
+            raw[i] = dir_x * ux_[i] + yaw + strafe;
             const float a = fabsf(raw[i]);
             if (a > peak) {
                 peak = a;
@@ -51,34 +48,37 @@ public:
     }
 
     void inverseNormalized(const Twist2D& ncmd, float step_hz_out[4]) const {
-        float dx = ncmd.vx;
-        float dy = ncmd.vy;
-        float w = ncmd.omega;
+        float vx = ncmd.vx;
+        float vy = ncmd.vy;      // strafe (body +y / stick right — see mapping)
+        float w = ncmd.omega;    // yaw
         if (cfg_.invert_vx) {
-            dx = -dx;
+            vx = -vx;
         }
         if (cfg_.invert_vy) {
-            dy = -dy;
+            vy = -vy;
         }
         if (cfg_.invert_omega) {
             w = -w;
         }
-        inverseNormalized(dx, dy, w, step_hz_out);
+        // Twist2D: vx forward, vy strafe, omega yaw → chassis column mapping
+        inverseNormalized(vx, w, vy, step_hz_out);
     }
 
+    /**
+     * Body twist from commanded wheel step rates (SI).
+     * Uses wheel radius + steps/rev — NOT max_vx (that was ~2.5× too small).
+     */
     Twist2D forwardSi(const float step_hz[4]) const {
-        const float scale = static_cast<float>(cfg_.max_step_hz);
-        if (scale < 1.0f) {
-            return {};
-        }
         float ata[3][3] = {};
         float atb[3] = {};
         for (int i = 0; i < 4; ++i) {
-            const float yi = step_hz[i] / scale;
-            const float a0 = ux_[i];
-            const float a1 = uy_[i];
-            const float a2 = (x_[i] * uy_[i] - y_[i] * ux_[i]) * inv_r_;
-            const float row[3] = {a0, a1, a2};
+            // Linear speed along drive direction (m/s)
+            const float yi = cfg_.stepHzToMps(step_hz[i]);
+            // Same column order as inverseNormalized(vx, yaw, strafe):
+            //   v_i = ux*vx + uy*(R*ω) + lever*vy
+            const float lever = x_[i] * uy_[i] - y_[i] * ux_[i];
+            const float R = 1.0f / inv_r_;
+            const float row[3] = {ux_[i], lever, uy_[i] * R};  // vx, vy, omega
             for (int r = 0; r < 3; ++r) {
                 atb[r] += row[r] * yi;
                 for (int c = 0; c < 3; ++c) {
@@ -89,9 +89,9 @@ public:
         float x[3] = {};
         solve3x3(ata, atb, x);
         Twist2D si;
-        si.vx = x[0] * cfg_.max_vx;
-        si.vy = x[1] * cfg_.max_vy;
-        si.omega = x[2] * cfg_.max_omega;
+        si.vx = x[0];
+        si.vy = x[1];
+        si.omega = x[2];
         return si;
     }
 

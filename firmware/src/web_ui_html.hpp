@@ -98,7 +98,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button id="stop">Stop</button>
       <button class="ok" id="resetOdom">Reset odom</button>
     </div>
-    <p class="hint" id="estopHint">Left = translate · Right X = yaw. Pure yaw: all 4 wheel Hz equal. If M3 fights the spin, Flip M3 in Config (M2/M3 reverse vs forward — check DIR cable).</p>
+    <p class="hint" id="estopHint">Left = XY translate · Right X = yaw. If yaw/strafe still feel swapped, say so — mapping is chassis-calibrated.</p>
   </section>
   <section class="card">
     <h2>Odometry</h2>
@@ -153,6 +153,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>STA pass</label><input id="sta_password" type="password" placeholder="leave blank to keep"/></div>
       <div class="row"><label>Zenoh</label><input id="zenoh_endpoint" placeholder="tcp/192.168.1.100:7447"/></div>
       <div class="row"><label>r (m)</label><input id="wheel_radius_m" type="number" step="0.001"/></div>
+      <p class="hint">Wheel <b>radius</b> (diameter 10 cm → r = 0.05). Used for odometry with steps/rev.</p>
       <div class="row"><label>lx (m)</label><input id="lx_m" type="number" step="0.001"/></div>
       <div class="row"><label>ly (m)</label><input id="ly_m" type="number" step="0.001"/></div>
       <div class="row"><label>steps/rev</label><input id="steps_per_rev" type="number" step="1"/></div>
@@ -264,11 +265,11 @@ document.querySelectorAll('.tab').forEach(btn=>{
 });
 
 /**
- * Same IK as HolonomicKinematics.hpp (SI corners + 45° drive dirs).
- * getDirection(sy, sx, rot): sy=forward, sx=right (Qt/web stick).
- * Pure yaw → all four equal (M3 must match M0..M2; if not, Flip M3 in Config).
+ * Holonomic mix (SI corners + 45° dirs). On this chassis the geometric
+ * "dirY" column produces yaw and the "ω×r" column produces strafe — so the
+ * stick maps: forward→dirX, yaw→dirY, strafe→rotation (swapped vs textbook).
  */
-function getDirection(dirX, dirY, rotation){
+function getDirection(dirX, yawCmd, strafeCmd){
   const lx=lxM, ly=lyM;
   const corners=[[+lx,-ly],[-lx,-ly],[+lx,+ly],[-lx,+ly]];
   const dirs=[[-1,-1],[-1,+1],[+1,-1],[+1,+1]];
@@ -276,30 +277,29 @@ function getDirection(dirX, dirY, rotation){
   return corners.map(([x,y],i)=>{
     const dn=Math.hypot(dirs[i][0],dirs[i][1])||1;
     const ux=dirs[i][0]/dn, uy=dirs[i][1]/dn;
-    const transl=dirX*ux + dirY*uy;
-    const rot=rotation*(x*uy - y*ux)/R;
-    return transl+rot;
+    const transl=dirX*ux + yawCmd*uy;
+    const strafe=strafeCmd*(x*uy - y*ux)/R;
+    return transl+strafe;
   });
 }
 
 function motorsFromStick(sx, sy, rot, speedFrac){
   if(estopLocal) return [0,0,0,0];
-  let dirs=getDirection(sy, sx, rot);
+  // sy=forward, rot=yaw, sx=strafe-right
+  let dirs=getDirection(sy, rot, sx);
   const peak=Math.max(...dirs.map(v=>Math.abs(v)), 1e-9);
   if(peak>1) dirs=dirs.map(v=>v/peak);
   const hz=speedFrac*maxStepHz;
-  // motor_sign applied on firmware for teleop; send logical IK here
   return dirs.map(v=>Math.round(v*hz));
 }
 function motorsFromTest(){
   if(estopLocal) return [0,0,0,0];
   const s=(+testScale.value)/100;
-  // Raw electrical sense (no IK / no motor_sign) — diagnose DIR wiring
   return motorPct.map(p=>Math.round((p/100)*s*maxStepHz));
 }
 function motorsYawSpin(speedFrac, sense){
-  // Explicit on-axis pattern from IK (all equal). sense: +1 or -1
-  return getDirection(0,0,sense).map(v=>Math.round(v*speedFrac*maxStepHz));
+  // Yaw uses the dirY column on this chassis
+  return getDirection(0, sense, 0).map(v=>Math.round(v*speedFrac*maxStepHz));
 }
 
 function applyOdom(m){
