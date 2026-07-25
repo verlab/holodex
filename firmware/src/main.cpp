@@ -1,22 +1,31 @@
 #include <Arduino.h>
-#include <WiFi.h>
 #include <Wire.h>
-#include <algorithm>
+#include <cmath>
 
-extern "C" {
-#include <zenoh-pico.h>
-}
-
+#include "AccelGyroReader.hpp"
+#include "FirmwareVersion.hpp"
+#include "HolonomicKinematics.hpp"
+#include "MotionController.hpp"
+#include "Odometry.hpp"
+#include "OtaService.hpp"
+#include "RobotConfig.hpp"
+#include "StatusLed.hpp"
+#include "WebInterface.hpp"
+#include "WifiPortal.hpp"
 #include "ZenohStateManager.hpp"
 #include "stepper.hpp"
-#include "AccelGyroReader.hpp"
 
+#include "soc/rtc_cntl_reg.h"
+#include "soc/soc.h"
 
-// I2C pins
+// I2C
 #define I2C_SDA 21
 #define I2C_SCL 5
 
-// Pinos
+// Built-in LED on DOIT ESP32 DevKit
+#define STATUS_LED_PIN 2
+
+// Stepper pins (pulse / dir / enable)
 #define PULSE_PIN1 19
 #define DIR_PIN1 18
 #define ENA_PIN1 17
@@ -33,126 +42,189 @@ extern "C" {
 #define DIR_PIN4 25
 #define ENA_PIN4 26
 
+static RobotConfig g_cfg;
+static Stepper* g_motors[4] = {};
+static AccelGyroReader* g_imu = nullptr;
+static HolonomicKinematics* g_kin = nullptr;
+static Odometry* g_odom = nullptr;
+static MotionController* g_motion = nullptr;
+static WifiPortal* g_wifi = nullptr;
+static WebInterface* g_web = nullptr;
+static ZenohStateManager* g_zenoh = nullptr;
+static StatusLed g_led(STATUS_LED_PIN);
+static OtaService g_ota;
 
-// Zenoh config
-const char* SSID = "";
-const char* PASSWORD = "";
-const char* zenoh_router_endpoint = "tcp/150.164.212.252:7447"; // Altere para o IP do seu roteador/agent Zenoh
-ZenohStateManager* zenoh = nullptr;
+static uint32_t g_last_ctrl_ms = 0;
+static uint32_t g_last_imu_ms = 0;
+static uint32_t g_last_zenoh_odom_ms = 0;
+static uint32_t g_last_zenoh_try_ms = 0;
 
+static void onOtaBusy(bool busy, void* /*ctx*/) {
+    g_led.setMode(busy ? StatusLed::Mode::Ota : StatusLed::Mode::Idle);
+    if (busy && g_motion) {
+        g_motion->emergencyStop(millis());
+    }
+}
 
-Stepper* stepper1 = nullptr;
-Stepper* stepper2 = nullptr;
-Stepper* stepper3 = nullptr;
-Stepper* stepper4 = nullptr;
-uint32_t MAX_ACCEL = 10000;
+static void onZenohCmd(const Twist2D& twist, void* /*ctx*/) {
+    if (g_motion) {
+        g_motion->setZenohCommand(twist, millis());
+    }
+}
 
-// Accel sensor
-AccelGyroReader* accelSensor = nullptr;
+static void onZenohMotors(const MotorDTO& m, void* /*ctx*/) {
+    if (g_motion) {
+        g_motion->setRawMotorHz(static_cast<float>(m.motorA), static_cast<float>(m.motorB),
+                                static_cast<float>(m.motorC), static_cast<float>(m.motorD),
+                                millis());
+    }
+}
 
+static void tryStartZenoh() {
+    if (!g_cfg.zenoh_enabled || g_cfg.zenoh_endpoint[0] == '\0') {
+        return;
+    }
+    if (!g_wifi || !g_wifi->staConnected()) {
+        return;
+    }
+    if (g_zenoh && g_zenoh->isReady()) {
+        return;
+    }
+
+    if (g_zenoh) {
+        delete g_zenoh;
+        g_zenoh = nullptr;
+    }
+
+    Serial.println("[Zenoh] Starting bridge...");
+    g_zenoh = new ZenohStateManager(g_cfg.zenoh_endpoint);
+    if (!g_zenoh->isReady()) {
+        delete g_zenoh;
+        g_zenoh = nullptr;
+        Serial.println("[Zenoh] Not ready — will retry");
+    } else {
+        g_zenoh->setCommandCallback(onZenohCmd, nullptr);
+        g_zenoh->setMotorCallback(onZenohMotors, nullptr);
+    }
+
+    if (g_web) {
+        g_web->setZenohReady(g_zenoh && g_zenoh->isReady());
+    }
+}
+
+static void onConfigChanged(void* /*ctx*/) {
+    if (g_kin) {
+        g_kin->setConfig(g_cfg);
+    }
+    if (g_zenoh) {
+        delete g_zenoh;
+        g_zenoh = nullptr;
+    }
+    if (g_web) {
+        g_web->setZenohReady(false);
+    }
+    if (g_wifi) {
+        g_wifi->begin();
+    }
+}
 
 void setup() {
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
     Serial.begin(115200);
+    delay(200);
+    Serial.println("\n=== HoloDex firmware ===");
+    Serial.printf("[Boot] Version %s (%s)\n", HOLODEX_FW_VERSION, HOLODEX_FW_BUILD);
 
-    // Init i2c
+    g_led.begin();
+    g_cfg.load();
+
+    g_wifi = new WifiPortal(g_cfg);
+    g_wifi->begin();
+
+    g_ota.begin(onOtaBusy, nullptr);
+
+    g_motors[0] = new Stepper(PULSE_PIN1, DIR_PIN1, ENA_PIN1);
+    g_motors[1] = new Stepper(PULSE_PIN2, DIR_PIN2, ENA_PIN2);
+    g_motors[2] = new Stepper(PULSE_PIN3, DIR_PIN3, ENA_PIN3);
+    g_motors[3] = new Stepper(PULSE_PIN4, DIR_PIN4, ENA_PIN4);
+
+    g_kin = new HolonomicKinematics(g_cfg);
+    g_odom = new Odometry(*g_kin);
+    g_motion = new MotionController(g_cfg, g_motors, *g_kin, *g_odom);
+
+    g_web = new WebInterface(g_cfg, *g_motion, *g_odom, *g_wifi);
+    g_web->begin(&g_ota);
+    g_web->onConfigChanged(onConfigChanged, nullptr);
+
     Wire.begin(I2C_SDA, I2C_SCL);
-
-    // Driver config
-    stepper1 = new Stepper(
-        PULSE_PIN1,
-        DIR_PIN1,
-        ENA_PIN1
-    );
-    stepper2 = new Stepper(
-        PULSE_PIN2,
-        DIR_PIN2,
-        ENA_PIN2
-    );
-    stepper3 = new Stepper(
-        PULSE_PIN3,
-        DIR_PIN3,
-        ENA_PIN3
-    );
-    stepper4 = new Stepper(
-        PULSE_PIN4,
-        DIR_PIN4,
-        ENA_PIN4
-    );
-
-    accelSensor = new AccelGyroReader();
-    
-    
-    // Starting WiFi
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(SSID, PASSWORD);
-    Serial.print("Conectando ao WiFi");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\nWiFi Conectado!");
-
-
-    // Starting zenoh
-    zenoh = new ZenohStateManager(zenoh_router_endpoint);
-
-    if(zenoh && zenoh->isReady() == false) {
-        delete zenoh;
-        zenoh = nullptr;
+    g_imu = new AccelGyroReader();
+    if (!g_imu->begin()) {
+        Serial.println("[Boot] IMU optional — continuing without gyro fusion");
     }
 
+    g_last_ctrl_ms = millis();
+    Serial.println("[Boot] LED: slow=idle  fast=driving  double=ESTOP  flicker=OTA");
+    Serial.println("[Boot] http://192.168.4.1/  OTA password=holodex");
 }
 
 void loop() {
-    static int msg_id = 0;
-    char payload[64];
-    sprintf(payload, "Mensagem %d do ESP32", msg_id++);
+    const uint32_t now = millis();
 
-    if(zenoh){
-        static int n = 0;
-        if(n>20)
-        {
-            zenoh->sendMessage(payload);
-            n = 0;
+    g_led.loop();
+    g_ota.loop();
+
+    if (g_ota.busy()) {
+        return;  // don't teleop / zenoh during flash
+    }
+
+    if (g_wifi) {
+        g_wifi->loop();
+    }
+    if (g_web) {
+        g_web->loop();
+    }
+
+    // LED mode from robot state
+    if (g_motion) {
+        if (g_motion->estop()) {
+            g_led.setMode(StatusLed::Mode::Estop);
+        } else if (g_motion->driving()) {
+            g_led.setMode(StatusLed::Mode::Driving);
+        } else {
+            g_led.setMode(StatusLed::Mode::Idle);
         }
-        n++;
-
-        int32_t ma = zenoh->get_motorA();
-        int32_t mb = zenoh->get_motorB();
-        int32_t mc = zenoh->get_motorC();
-        int32_t md = zenoh->get_motorD();
-
-        int32_t current_ma = stepper1->getSpeedHz();
-        int32_t current_mb = stepper2->getSpeedHz();
-        int32_t current_mc = stepper3->getSpeedHz();
-        int32_t current_md = stepper4->getSpeedHz();
-
-        int32_t d1 = abs(ma - current_ma);
-        int32_t d2 = abs(mb - current_mb);
-        int32_t d3 = abs(mc - current_mc);
-        int32_t d4 = abs(md - current_md);
-
-        int32_t max_delta = max(max(d1, d2), max(d3, d4));
-
-        if(max_delta == 0) max_delta = 1;
-
-        int32_t a1 = (MAX_ACCEL * d1) / max_delta;
-        int32_t a2 = (MAX_ACCEL * d2) / max_delta;
-        int32_t a3 = (MAX_ACCEL * d3) / max_delta;
-        int32_t a4 = (MAX_ACCEL * d4) / max_delta;
-
-        stepper1->setSpeed(ma, a1, ma>0);
-        stepper2->setSpeed(mb, a2, mb>0);
-        stepper3->setSpeed(mc, a3, mc>0);
-        stepper4->setSpeed(md, a4, md>0);
-        
-        delay(100); // Envia a cada 0.1 segundos
     }
-    else {
-        accelSensor->read();
-        delay(50);
+
+    if (!g_motion || !g_odom) {
+        return;
     }
-    
 
+    // Control / odom @ 50 Hz. Motors are also applied immediately on cmd receive.
+    const uint32_t dt_ms = now - g_last_ctrl_ms;
+    if (dt_ms >= 20) {
+        const float dt_s = dt_ms * 0.001f;
+        g_last_ctrl_ms = now;
 
+        float gyro_z = NAN;
+        // IMU rarely — I2C failures must not stall teleop
+        if (g_imu && g_imu->ready() && now - g_last_imu_ms >= 100) {
+            g_last_imu_ms = now;
+            if (g_imu->read()) {
+                gyro_z = g_imu->gyroZ();
+            }
+        }
+
+        g_motion->update(dt_s, gyro_z, now);
+    }
+
+    if ((!g_zenoh || !g_zenoh->isReady()) && now - g_last_zenoh_try_ms > 8000) {
+        g_last_zenoh_try_ms = now;
+        tryStartZenoh();
+    }
+
+    if (g_zenoh && g_zenoh->isReady() && now - g_last_zenoh_odom_ms >= 200) {
+        g_last_zenoh_odom_ms = now;
+        g_zenoh->publishOdometry(g_odom->state());
+    }
 }

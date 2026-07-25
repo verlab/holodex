@@ -1,36 +1,41 @@
 #include "AccelGyroReader.hpp"
 
-AccelGyroReader::AccelGyroReader()
-{
-    // 1. Inicializa o I2C. O método I2cInit da biblioteca da DFRobot 
-    // já faz o soft reset e acorda o sensor (Modo Normal) internamente.
-    if (bmi160.I2cInit(0x69) != BMI160_OK) {
-        Serial.println("I2C Init failed. Check wiring/address.");
-        return;
+AccelGyroReader::AccelGyroReader() = default;
+
+bool AccelGyroReader::begin() {
+    if (bmi160_.I2cInit(0x69) != BMI160_OK) {
+        Serial.println("[IMU] BMI160 init failed — check wiring/address");
+        ready_ = false;
+        return false;
+    }
+    delay(20);
+    ready_ = true;
+    Serial.println("[IMU] BMI160 ready");
+    return true;
+}
+
+bool AccelGyroReader::read() {
+    if (!ready_) {
+        return false;
     }
 
-    // 2. A chamada de softReset() foi REMOVIDA. 
-    // Se você fizer um soft reset aqui, o sensor voltará a dormir (Suspend Mode) e lerá 0.
+    int16_t raw[6] = {};
+    // Library layout: gyro[3] then accel[3]
+    bmi160_.getAccelGyroData(raw);
 
-    delay(20); // Pequeno atraso para estabilização
-    Serial.println("BMI initialized successfully.");
+    for (int i = 0; i < 3; ++i) {
+        gyro_rps_[i] = gyroToRps(raw[i]);
+        accel_mps2_[i] = accelToMps2(raw[i + 3]);
+    }
+    return true;
 }
 
-void AccelGyroReader::read()
-{
-    // Lê os 12 bytes e preenche a struct (6 bytes para Gyro, 6 para Accel)
-    bmi160.getAccelGyroData(reinterpret_cast<int16_t*>(&lastRead));
-
-    Serial.print("Accel read:");
-    Serial.print(" X ");
-    Serial.print(convert(lastRead.accel[0]));
-    Serial.print(" Y ");
-    Serial.print(convert(lastRead.accel[1]));
-    Serial.print(" Z ");
-    Serial.println(convert(lastRead.accel[2]));
+float AccelGyroReader::accelToMps2(int16_t val) {
+    return (static_cast<float>(val) / 16384.0f) * 9.80665f;
 }
 
-float AccelGyroReader::convert(int16_t val)
-{
-    return (float(val)/16384.0f) * 9.80665f;
+float AccelGyroReader::gyroToRps(int16_t val) {
+    // BMI160 default ±2000 dps, 16.4 LSB/(°/s)
+    constexpr float deg2rad = static_cast<float>(M_PI) / 180.0f;
+    return (static_cast<float>(val) / 16.4f) * deg2rad;
 }
