@@ -1,0 +1,51 @@
+---
+description: HoloDex project memory — architecture, stack, VerLab workflow
+alwaysApply: true
+---
+
+# HoloDex (VerLab)
+
+Omnidirectional lab robot: 4× NEMA23 steppers + 3D-printed omni wheels. Private VerLab repo.
+
+## Control architecture (firmware-centric)
+
+Kinematics, odometry, and teleop live on the ESP32. The PC Python UI is legacy/optional.
+
+| Path | Role |
+|------|------|
+| `firmware/` | ESP32 PlatformIO firmware — IK, odometry, SoftAP web teleop, Zenoh ROS bridge |
+| `src/` | Legacy PySide6 client (raw motor Hz over Zenoh); prefer web UI |
+| `docker/` | Eclipse Zenoh router (`7447`, `8000`) |
+
+### Runtime flow
+
+```
+Web joystick (SoftAP) ─┐
+                       ├─► MotionController (watchdog, web > zenoh)
+Zenoh holodex/cmd_vel ─┘         │
+                                 ▼
+                      HolonomicKinematics (IK)
+                                 │
+                      FastAccelStepper ×4
+                                 │
+                      Odometry (FK + optional gyro Z)
+                                 ├─► WebSocket odom stream
+                                 └─► Zenoh holodex/odom
+```
+
+- SoftAP SSID default `HoloDex` / `holodex123` → `http://192.168.4.1/` (WS `:81`)
+- WIFI_AP_STA: AP always on; STA optional for Zenoh/lab network (NVS config via web)
+- Zenoh topics (ROS-oriented JSON): `holodex/cmd_vel` (sub), `holodex/odom` (pub)
+- Geometry: `r=0.05 m`, `lx=0.19 m` (38 cm wheelbase/2), `ly=0.195 m` (39 cm track/2), `steps_per_rev=6400` (32 µstep); driver 2 A via Vref
+
+## Contribution
+
+- Branch from `dev`; PRs → `dev` → `main`. Conventional Commits.
+- Details: `CONTRIBUTING.md`.
+
+## When editing
+
+- Keep body-frame `Twist2D` (vx, vy, omega) as the control interface — do not move IK back to the host.
+- Align web + Zenoh command paths through `MotionController`.
+- Do not commit WiFi secrets; use SoftAP config page / NVS.
+- All user-facing firmware strings and new docs: English.

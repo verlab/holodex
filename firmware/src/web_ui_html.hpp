@@ -102,14 +102,15 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 <main id="pane-motors">
   <section class="card" style="grid-column:1/-1">
     <h2>Individual motor test</h2>
-    <p class="hint">Use this to find the dead motor / wiring / enable pin. Only one (or several) run; teleop is paused while this tab is active.</p>
+    <p class="hint">Idle motors are <b>disabled</b> (freewheel) so one wheel can spin without fighting three locked steppers. Teleop keeps all enabled.</p>
     <div id="motorSliders"></div>
-    <div class="row"><label>Test %</label><input id="testScale" type="range" min="5" max="80" step="5" value="25"/><span class="val" id="testScaleVal">25%</span></div>
+    <div class="row"><label>Test %</label><input id="testScale" type="range" min="5" max="80" step="5" value="30"/><span class="val" id="testScaleVal">30%</span></div>
     <div class="btns">
       <button class="ok" id="testAllFwd">All +</button>
       <button id="testAllRev">All −</button>
       <button class="danger" id="testStop">Stop all</button>
     </div>
+    <p class="hint" id="testDbg">cmd: —</p>
     <p class="hint">Pins: M0 P19/D18/E17 · M1 P27/D14/E13 · M2 P23/D22/E32 · M3 P33/D25/E26. If one never moves here, check that driver’s STEP/DIR/ENA cable and Vref.</p>
   </section>
 </main>
@@ -191,7 +192,7 @@ document.querySelectorAll('.tab').forEach(btn=>{
     btn.classList.add('active');
     activePane=btn.dataset.pane;
     document.getElementById('pane-'+activePane).classList.add('active');
-    if(activePane!=='motors'){ motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } pushMotors([0,0,0,0]); }
+    if(activePane!=='motors'){ motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } pushMotors([0,0,0,0], false); }
     if(activePane!=='drive'){ vx=0;vy=0;dragging=false;setKnob(0,0); }
   };
 });
@@ -279,12 +280,18 @@ function connect(){
   ws.onmessage=(ev)=>{ try{ const m=JSON.parse(ev.data); if(m.type==='odom') applyOdom(m); else if(m.type==='cfg') applyCfg(m);}catch(e){} };
 }
 let httpInflight=false;
-function pushMotors(motors){
-  cmdDbg.textContent=`M ${motors.join(' ')}`;
-  if(ws&&ws.readyState===1){ ws.send(JSON.stringify({type:'motors', m0:motors[0], m1:motors[1], m2:motors[2], m3:motors[3]})); return; }
+function pushMotors(motors, testMode){
+  const msg=`M ${motors.join(' ')}${testMode?' [test]':''}`;
+  cmdDbg.textContent=msg;
+  if(testDbg) testDbg.textContent='cmd: '+msg;
+  if(ws&&ws.readyState===1){
+    ws.send(JSON.stringify({type:'motors', test:!!testMode, m0:motors[0], m1:motors[1], m2:motors[2], m3:motors[3]}));
+    return;
+  }
   if(httpInflight) return;
   httpInflight=true;
-  fetch(`/api/cmd?m0=${motors[0]}&m1=${motors[1]}&m2=${motors[2]}&m3=${motors[3]}&t=${Date.now()}`,{cache:'no-store'})
+  const t=testMode?'&test=1':'';
+  fetch(`/api/cmd?m0=${motors[0]}&m1=${motors[1]}&m2=${motors[2]}&m3=${motors[3]}${t}&t=${Date.now()}`,{cache:'no-store'})
     .then(r=>r.json()).then(applyOdom).catch(()=>{}).finally(()=>{httpInflight=false;});
 }
 function pushCmd(forceStop){
@@ -294,7 +301,7 @@ function pushCmd(forceStop){
   if(!active && !lastSentActive) return;
   const motors=active?motorsFromStick(vx,vy,yaw,s):[0,0,0,0];
   lastSentActive=active && motors.some(v=>v!==0);
-  pushMotors(motors);
+  pushMotors(motors, false);
 }
 function pushTest(force){
   if(activePane!=='motors') return;
@@ -302,7 +309,7 @@ function pushTest(force){
   const active=force||motors.some(v=>v!==0);
   if(!active && !lastSentActive) return;
   lastSentActive=active;
-  pushMotors(active?motors:[0,0,0,0]);
+  pushMotors(active?motors:[0,0,0,0], true);
 }
 estop.onclick=()=>{ estopLocal=true; vx=0;vy=0;yawEl.value=0;setKnob(0,0);motorPct.fill(0);lastSentActive=false;
   for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; }
@@ -315,7 +322,7 @@ clearEstop.onclick=()=>{ estopLocal=false;
 };
 stop.onclick=()=>{vx=0;vy=0;yawEl.value=0;setKnob(0,0);pushCmd(true)};
 resetOdom.onclick=()=>{ if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'reset_odom'})); fetch('/api/reset_odom').then(r=>r.json()).then(applyOdom); };
-testStop.onclick=()=>{ motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } pushMotors([0,0,0,0]); lastSentActive=false; };
+testStop.onclick=()=>{ motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } pushMotors([0,0,0,0], true); lastSentActive=false; };
 testAllFwd.onclick=()=>{ for(let i=0;i<4;i++){ motorPct[i]=100; document.getElementById('msl'+i).value=100; document.getElementById('msv'+i).textContent='100%'; } };
 testAllRev.onclick=()=>{ for(let i=0;i<4;i++){ motorPct[i]=-100; document.getElementById('msl'+i).value=-100; document.getElementById('msv'+i).textContent='-100%'; } };
 

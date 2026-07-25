@@ -58,7 +58,13 @@ public:
         copyHz(hz);
     }
 
-    void setRawMotorHz(float m0, float m1, float m2, float m3, uint32_t now_ms) {
+    /**
+     * Raw step-Hz per motor (Qt demo/pc_to_esp).
+     * test_mode=true → idle motors freewheel (disable holding) so each axis
+     * can be spun alone without fighting the other three locked steppers.
+     */
+    void setRawMotorHz(float m0, float m1, float m2, float m3, uint32_t now_ms,
+                       bool test_mode = false) {
         if (estop_) {
             return;
         }
@@ -67,11 +73,12 @@ public:
         raw_hz_[2] = m2;
         raw_hz_[3] = m3;
         raw_stamp_ms_ = now_ms;
+        raw_test_mode_ = test_mode;
         mode_ = Mode::RawMotors;
         web_cmd_.source = CmdSource::Web;
         web_cmd_.stamp_ms = now_ms;
 
-        applyWheelHz(raw_hz_);
+        applyWheelHz(raw_hz_, raw_test_mode_);
         active_source_ = CmdSource::Web;
         copyHz(raw_hz_);
     }
@@ -129,11 +136,13 @@ public:
         const bool raw_fresh =
             mode_ == Mode::RawMotors && (now_ms - raw_stamp_ms_) <= cfg_.cmd_timeout_ms;
 
+        bool freewheel = false;
         if (web_fresh && mode_ == Mode::RawMotors && raw_fresh) {
             for (int i = 0; i < 4; ++i) {
                 hz[i] = raw_hz_[i];
             }
             active_source_ = CmdSource::Web;
+            freewheel = raw_test_mode_;
         } else if (web_fresh && mode_ == Mode::Cinematic) {
             kin_.inverseNormalized(web_cmd_.twist, hz);
             active_source_ = CmdSource::Web;
@@ -141,12 +150,13 @@ public:
             kin_.inverseNormalized(zenoh_cmd_.twist, hz);
             active_source_ = CmdSource::Zenoh;
         } else {
-            // Timeout → stop (command already applied on receive; this clears coast)
+            // Timeout → stop + re-hold (exit freewheel test)
             active_source_ = CmdSource::None;
             mode_ = Mode::Idle;
+            raw_test_mode_ = false;
         }
 
-        applyWheelHz(hz);
+        applyWheelHz(hz, freewheel);
         copyHz(hz);
         odom_.update(hz, dt_s, gyro_z, now_ms);
     }
@@ -163,6 +173,7 @@ private:
     CmdSource active_source_ = CmdSource::None;
     Mode mode_ = Mode::Idle;
     bool estop_ = false;
+    bool raw_test_mode_ = false;
     float last_hz_[4] = {};
     float applied_hz_[4] = {};
     float raw_hz_[4] = {};
@@ -185,7 +196,7 @@ private:
         return t;
     }
 
-    void applyWheelHz(const float hz[4]) {
+    void applyWheelHz(const float hz[4], bool freewheel_idle = false) {
         int32_t targets[4];
         int32_t deltas[4];
         int32_t max_delta = 1;
@@ -208,12 +219,17 @@ private:
             if (!motors_[i]) {
                 continue;
             }
+            // Same proportional accel sync as the original main.cpp loop.
             int32_t accel = static_cast<int32_t>(
                 (static_cast<int64_t>(cfg_.max_accel_hz) * deltas[i]) / max_delta);
+            // Non-zero targets need real accel (avoid ~0 from idle siblings).
+            if (targets[i] != 0 && accel < static_cast<int32_t>(cfg_.max_accel_hz / 4)) {
+                accel = static_cast<int32_t>(cfg_.max_accel_hz / 4);
+            }
             if (accel < 1) {
                 accel = 1;
             }
-            motors_[i]->setSpeed(targets[i], accel);
+            motors_[i]->setSpeed(targets[i], accel, freewheel_idle);
             last_hz_[i] = static_cast<float>(targets[i]);
         }
     }

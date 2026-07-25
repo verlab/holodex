@@ -11,8 +11,14 @@ public:
     bool ok() const { return p_stepper != nullptr; }
     float getSpeedHz() const { return commanded_hz_; }
 
-    /** Signed speed in step Hz. 0 → decelerating stop (stopMove). */
-    void setSpeed(int32_t speed_hz, int32_t accel_hz);
+    /**
+     * Signed speed in step Hz.
+     * 0 → stopMove; if freewheel_if_zero, also disableOutputs (no holding).
+     * Non-zero → enableOutputs + runForward/runBackward (same as old main loop).
+     */
+    void setSpeed(int32_t speed_hz, int32_t accel_hz, bool freewheel_if_zero = false);
+
+    void setEnabled(bool on);
 
     /** Immediate halt (E-STOP only). */
     void hardStop();

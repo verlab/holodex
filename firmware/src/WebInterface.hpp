@@ -117,7 +117,7 @@ private:
         motion_.setWebCommand(n, millis());
     }
 
-    void acceptMotors(float m0, float m1, float m2, float m3) {
+    void acceptMotors(float m0, float m1, float m2, float m3, bool test_mode = false) {
         last_cmd_vx_ = m0;
         last_cmd_vy_ = m1;
         last_cmd_w_ = m2;
@@ -125,15 +125,16 @@ private:
         if (motion_.estop()) {
             return;
         }
-        motion_.setRawMotorHz(m0, m1, m2, m3, millis());
+        motion_.setRawMotorHz(m0, m1, m2, m3, millis(), test_mode);
     }
 
     void handleCmdGet() {
         // Preferred: raw motor Hz (same payload the Qt app sent over Zenoh)
         if (http_.hasArg("m0") || http_.hasArg("m1") || http_.hasArg("m2") ||
             http_.hasArg("m3")) {
+            const bool test = http_.hasArg("test") && http_.arg("test").toInt() != 0;
             acceptMotors(http_.arg("m0").toFloat(), http_.arg("m1").toFloat(),
-                         http_.arg("m2").toFloat(), http_.arg("m3").toFloat());
+                         http_.arg("m2").toFloat(), http_.arg("m3").toFloat(), test);
             sendOdom();
             return;
         }
@@ -150,12 +151,14 @@ private:
                 JsonDocument doc;
                 if (!deserializeJson(doc, http_.arg("plain"))) {
                     if (!doc["m0"].isNull() || !doc["motors"].isNull()) {
+                        const bool test = doc["test"] | false;
                         if (doc["motors"].is<JsonArray>()) {
                             JsonArray a = doc["motors"].as<JsonArray>();
-                            acceptMotors(a[0] | 0.0f, a[1] | 0.0f, a[2] | 0.0f, a[3] | 0.0f);
+                            acceptMotors(a[0] | 0.0f, a[1] | 0.0f, a[2] | 0.0f, a[3] | 0.0f,
+                                         test);
                         } else {
                             acceptMotors(doc["m0"] | 0.0f, doc["m1"] | 0.0f, doc["m2"] | 0.0f,
-                                         doc["m3"] | 0.0f);
+                                         doc["m3"] | 0.0f, test);
                         }
                     } else {
                         acceptStick(doc["vx"] | 0.0f, doc["vy"] | 0.0f, doc["omega"] | 0.0f);
@@ -242,12 +245,13 @@ private:
         const char* t = doc["type"] | "";
         if (strcmp(t, "cmd") == 0 || strcmp(t, "motors") == 0) {
             if (!doc["m0"].isNull() || doc["motors"].is<JsonArray>()) {
+                const bool test = doc["test"] | false;
                 if (doc["motors"].is<JsonArray>()) {
                     JsonArray a = doc["motors"].as<JsonArray>();
-                    acceptMotors(a[0] | 0.0f, a[1] | 0.0f, a[2] | 0.0f, a[3] | 0.0f);
+                    acceptMotors(a[0] | 0.0f, a[1] | 0.0f, a[2] | 0.0f, a[3] | 0.0f, test);
                 } else {
                     acceptMotors(doc["m0"] | 0.0f, doc["m1"] | 0.0f, doc["m2"] | 0.0f,
-                                 doc["m3"] | 0.0f);
+                                 doc["m3"] | 0.0f, test);
                 }
             } else {
                 acceptStick(doc["vx"] | 0.0f, doc["vy"] | 0.0f, doc["omega"] | 0.0f);
