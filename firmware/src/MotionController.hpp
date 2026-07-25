@@ -202,6 +202,11 @@ private:
         int32_t max_delta = 1;
         for (int i = 0; i < 4; ++i) {
             float h = hz[i];
+            // motor_sign from Config Flip checkboxes (teleop + zenoh). Motor-test
+            // bypasses this so sliders match electrical STEP/DIR sense.
+            if (!freewheel_idle && cfg_.motor_sign[i] < 0) {
+                h = -h;
+            }
             const float lim = static_cast<float>(cfg_.max_step_hz);
             if (h > lim) {
                 h = lim;
@@ -219,12 +224,13 @@ private:
             if (!motors_[i]) {
                 continue;
             }
-            // Same proportional accel sync as the original main.cpp loop.
+            // Proportional accel so wheels arrive together (original main.cpp).
+            // Floor keeps small-delta wheels from lagging visibly behind.
             int32_t accel = static_cast<int32_t>(
                 (static_cast<int64_t>(cfg_.max_accel_hz) * deltas[i]) / max_delta);
-            // Non-zero targets need real accel (avoid ~0 from idle siblings).
-            if (targets[i] != 0 && accel < static_cast<int32_t>(cfg_.max_accel_hz / 4)) {
-                accel = static_cast<int32_t>(cfg_.max_accel_hz / 4);
+            const int32_t floor_a = static_cast<int32_t>(cfg_.max_accel_hz / 2);
+            if (targets[i] != 0 && accel < floor_a) {
+                accel = floor_a;
             }
             if (accel < 1) {
                 accel = 1;

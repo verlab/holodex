@@ -5,14 +5,22 @@
 #include <cmath>
 
 /**
- * Exact port of src/cinematic.py + motor layout from src/main.py.
+ * Holonomic IK for 4× 45° omni wheels (port of cinematic.py + measured lx/ly).
  *
- * Qt path:
- *   set_value(joy_x, -joy_y)
- *   getDirection(y, x, rot)   // note the swap
+ * getDirection(dir_x, dir_y, rotation) convention (same as Qt):
+ *   Web/Qt stick: getDirection(sy, sx, rot) with sy=forward, sx=right.
  *
- * Web stick (sx=right, sy=up) matches pygame forward via:
- *   getDirection(sy, sx, rot)
+ * Motor index / corner:
+ *   M0 front-right  (+lx, −ly)  û = (−1,−1)/√2
+ *   M1 rear-right   (−lx, −ly)  û = (−1,+1)/√2
+ *   M2 front-left   (+lx, +ly)  û = (+1,−1)/√2
+ *   M3 rear-left    (−lx, +ly)  û = (+1,+1)/√2
+ *
+ *   wheel_i = û · v + ω_n * (x û_y − y û_x) / R
+ *
+ * Pure yaw (ω only): all four wheels same sign & |Hz|.
+ * Pure forward: M0=M1=−a, M2=M3=+a.
+ * motor_sign is applied in MotionController (not here).
  */
 class HolonomicKinematics {
 public:
@@ -23,29 +31,25 @@ public:
         rebuild();
     }
 
-    /**
-     * Same math as Cinematics.getDirection(direction_x, direction_y, rotation)
-     * then × max_step_hz (Qt used MAX_SPEED=25000).
-     */
-    void inverseNormalized(float direction_x, float direction_y, float rotation,
-                           float step_hz_out[4]) const {
+    void inverseNormalized(float dir_x, float dir_y, float rotation, float step_hz_out[4]) const {
+        float raw[4];
+        float peak = 1e-9f;
+        for (int i = 0; i < 4; ++i) {
+            const float transl = dir_x * ux_[i] + dir_y * uy_[i];
+            const float rot = rotation * (x_[i] * uy_[i] - y_[i] * ux_[i]) * inv_r_;
+            raw[i] = transl + rot;
+            const float a = fabsf(raw[i]);
+            if (a > peak) {
+                peak = a;
+            }
+        }
+        const float n = (peak > 1.0f) ? peak : 1.0f;
         const float scale = static_cast<float>(cfg_.max_step_hz);
         for (int i = 0; i < 4; ++i) {
-            const float transl = direction_x * dx_[i] + direction_y * dy_[i];
-            const float rot = rotation * (px_[i] * dy_[i] - py_[i] * dx_[i]);
-            float hz = (transl + rot) * scale;
-            const float sign = (cfg_.motor_sign[i] < 0) ? -1.0f : 1.0f;
-            hz *= sign;
-            if (hz > scale) {
-                hz = scale;
-            } else if (hz < -scale) {
-                hz = -scale;
-            }
-            step_hz_out[i] = hz;
+            step_hz_out[i] = (raw[i] / n) * scale;
         }
     }
 
-    /** Convenience: Twist2D as (direction_x, direction_y, omega) in cinematic space. */
     void inverseNormalized(const Twist2D& ncmd, float step_hz_out[4]) const {
         float dx = ncmd.vx;
         float dy = ncmd.vy;
@@ -63,7 +67,6 @@ public:
     }
 
     Twist2D forwardSi(const float step_hz[4]) const {
-        // Approximate SI for odom display only
         const float scale = static_cast<float>(cfg_.max_step_hz);
         if (scale < 1.0f) {
             return {};
@@ -71,11 +74,10 @@ public:
         float ata[3][3] = {};
         float atb[3] = {};
         for (int i = 0; i < 4; ++i) {
-            const float sign = (cfg_.motor_sign[i] < 0) ? -1.0f : 1.0f;
-            const float yi = (step_hz[i] * sign) / scale;
-            const float a0 = dx_[i];
-            const float a1 = dy_[i];
-            const float a2 = px_[i] * dy_[i] - py_[i] * dx_[i];
+            const float yi = step_hz[i] / scale;
+            const float a0 = ux_[i];
+            const float a1 = uy_[i];
+            const float a2 = (x_[i] * uy_[i] - y_[i] * ux_[i]) * inv_r_;
             const float row[3] = {a0, a1, a2};
             for (int r = 0; r < 3; ++r) {
                 atb[r] += row[r] * yi;
@@ -95,27 +97,32 @@ public:
 
 private:
     RobotConfig cfg_;
-    float dx_[4] = {};
-    float dy_[4] = {};
-    float px_[4] = {};
-    float py_[4] = {};
+    float ux_[4] = {};
+    float uy_[4] = {};
+    float x_[4] = {};
+    float y_[4] = {};
+    float inv_r_ = 1.0f;
 
     void rebuild() {
-        // Identical to src/main.py addMotor(...) calls
-        const float raw[4][4] = {
-            {-1.0f, -1.0f, 23.5f, -14.7f},
-            {-1.0f, 1.0f, -23.5f, -14.7f},
-            {1.0f, -1.0f, 23.5f, 14.7f},
-            {1.0f, 1.0f, -23.5f, 14.7f},
-        };
+        const float lx = cfg_.lx_m > 1e-4f ? cfg_.lx_m : 0.19f;
+        const float ly = cfg_.ly_m > 1e-4f ? cfg_.ly_m : 0.195f;
+        const float px[4] = {+lx, -lx, +lx, -lx};
+        const float py[4] = {-ly, -ly, +ly, +ly};
+        const float rdx[4] = {-1.0f, -1.0f, +1.0f, +1.0f};
+        const float rdy[4] = {-1.0f, +1.0f, -1.0f, +1.0f};
+        float rmax = 1e-6f;
         for (int i = 0; i < 4; ++i) {
-            const float dn = sqrtf(raw[i][0] * raw[i][0] + raw[i][1] * raw[i][1]);
-            dx_[i] = raw[i][0] / dn;
-            dy_[i] = raw[i][1] / dn;
-            const float pn = sqrtf(raw[i][2] * raw[i][2] + raw[i][3] * raw[i][3]);
-            px_[i] = raw[i][2] / pn;
-            py_[i] = raw[i][3] / pn;
+            x_[i] = px[i];
+            y_[i] = py[i];
+            const float dn = sqrtf(rdx[i] * rdx[i] + rdy[i] * rdy[i]);
+            ux_[i] = rdx[i] / dn;
+            uy_[i] = rdy[i] / dn;
+            const float ri = sqrtf(px[i] * px[i] + py[i] * py[i]);
+            if (ri > rmax) {
+                rmax = ri;
+            }
         }
+        inv_r_ = 1.0f / rmax;
     }
 
     static bool solve3x3(float A[3][3], const float b[3], float x[3]) {

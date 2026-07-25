@@ -27,15 +27,23 @@ header{display:flex;justify-content:space-between;align-items:center;gap:10px;pa
 .tab.active{color:var(--text);border-color:var(--accent);background:#1a2e3a}
 main{display:none;gap:14px;padding:var(--pad);max-width:960px;margin:0 auto}
 main.active{display:grid}
-@media(min-width:820px){#pane-drive.active{grid-template-columns:1.1fr .9fr}}
+@media(min-width:820px){#pane-drive.active{grid-template-columns:1.15fr .85fr}}
 .card{background:linear-gradient(180deg,rgba(255,255,255,.03),transparent),var(--bg1);border:1px solid var(--line);border-radius:var(--r);padding:14px}
 h2{margin:0 0 10px;font-size:.85rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
-.joy-wrap{display:flex;justify-content:center;padding:8px 0 4px}
-#joy{width:min(72vw,280px);height:min(72vw,280px);touch-action:none;border-radius:50%;background:radial-gradient(circle at 50% 50%,#1c2b38 0%,#121c26 70%);border:1px solid var(--line);position:relative}
-#knob{position:absolute;width:72px;height:72px;border-radius:50%;background:var(--accent);left:50%;top:50%;transform:translate(-50%,-50%)}
+.joys{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:end}
+@media(max-width:520px){.joys{grid-template-columns:1fr}}
+.joy-block{text-align:center}
+.joy-block .cap{font-size:.75rem;color:var(--muted);margin-bottom:6px;letter-spacing:.06em;text-transform:uppercase}
+.pad{touch-action:none;border-radius:50%;background:radial-gradient(circle at 50% 50%,#1c2b38 0%,#121c26 70%);border:1px solid var(--line);position:relative;margin:0 auto}
+.pad.move{width:min(42vw,240px);height:min(42vw,240px)}
+.pad.turn{width:min(36vw,180px);height:min(36vw,180px)}
+.pad .knob{position:absolute;border-radius:50%;background:var(--accent);left:50%;top:50%;transform:translate(-50%,-50%)}
+.pad.move .knob{width:64px;height:64px}
+.pad.turn .knob{width:52px;height:52px;background:#7ec8ff}
 .row{display:flex;gap:10px;align-items:center;margin-top:10px}
-label{font-size:.8rem;color:var(--muted);min-width:72px}
+label{font-size:.8rem;color:var(--muted);min-width:88px}
 input[type=range]{flex:1}
+.val{min-width:72px;text-align:right;font-variant-numeric:tabular-nums;font-size:.85rem;color:var(--text)}
 .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .metric{background:#0f1720;border:1px solid var(--line);border-radius:8px;padding:8px}
 .metric b{display:block;font-size:1.05rem;font-variant-numeric:tabular-nums}
@@ -49,7 +57,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 .bar{height:8px;background:#0f1720;border-radius:99px;overflow:hidden;border:1px solid var(--line)}
 .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),#5adf8a)}
 .motor-row{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
-.motor-row .val{min-width:64px;text-align:right;font-variant-numeric:tabular-nums}
+.motor-row .val{min-width:64px}
 </style>
 </head>
 <body>
@@ -69,16 +77,28 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 <main id="pane-drive" class="active">
   <section class="card">
     <h2>Teleoperation</h2>
-    <div class="joy-wrap"><div id="joy"><div id="knob"></div></div></div>
-    <div class="row"><label>Yaw</label><input id="yaw" type="range" min="-1" max="1" step="0.01" value="0"/></div>
-    <div class="row"><label>Scale</label><input id="scale" type="range" min="0.05" max="1" step="0.05" value="0.35"/></div>
+    <div class="joys">
+      <div class="joy-block">
+        <div class="cap">Move · XY</div>
+        <div class="pad move" id="joyMove"><div class="knob" id="knobMove"></div></div>
+      </div>
+      <div class="joy-block">
+        <div class="cap">Turn · yaw</div>
+        <div class="pad turn" id="joyTurn"><div class="knob" id="knobTurn"></div></div>
+      </div>
+    </div>
+    <div class="row">
+      <label>Max speed</label>
+      <input id="maxSpeed" type="range" min="5" max="100" step="1" value="35"/>
+      <span class="val" id="maxSpeedVal">35%</span>
+    </div>
     <div class="btns">
       <button class="danger" id="estop">E-STOP</button>
       <button id="clearEstop">Clear E-Stop</button>
       <button id="stop">Stop</button>
       <button class="ok" id="resetOdom">Reset odom</button>
     </div>
-    <p class="hint" id="estopHint">Hold stick for XY + yaw. Lower Scale = quieter. LED fast blink = driving.</p>
+    <p class="hint" id="estopHint">Left = translate · Right X = yaw. Pure yaw: all 4 wheel Hz equal. If M3 fights the spin, Flip M3 in Config (M2/M3 reverse vs forward — check DIR cable).</p>
   </section>
   <section class="card">
     <h2>Odometry</h2>
@@ -102,16 +122,18 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 <main id="pane-motors">
   <section class="card" style="grid-column:1/-1">
     <h2>Individual motor test</h2>
-    <p class="hint">Idle motors are <b>disabled</b> (freewheel) so one wheel can spin without fighting three locked steppers. Teleop keeps all enabled.</p>
+    <p class="hint">Idle motors are <b>disabled</b> (freewheel) so one wheel can spin alone. Teleop keeps all enabled.</p>
     <div id="motorSliders"></div>
     <div class="row"><label>Test %</label><input id="testScale" type="range" min="5" max="80" step="5" value="30"/><span class="val" id="testScaleVal">30%</span></div>
     <div class="btns">
       <button class="ok" id="testAllFwd">All +</button>
       <button id="testAllRev">All −</button>
+      <button id="testYawCCW">Yaw CCW (IK)</button>
+      <button id="testYawCW">Yaw CW (IK)</button>
       <button class="danger" id="testStop">Stop all</button>
     </div>
     <p class="hint" id="testDbg">cmd: —</p>
-    <p class="hint">Pins: M0 P19/D18/E17 · M1 P27/D14/E13 · M2 P23/D22/E32 · M3 P33/D25/E26. If one never moves here, check that driver’s STEP/DIR/ENA cable and Vref.</p>
+    <p class="hint">Yaw IK: all four Hz equal. If M3 bar matches but wheel spins the wrong way, enable <b>Flip M3</b> in Config. Pins: M0 P19/D18/E17 · M1 P27/D14/E13 · M2 P23/D22/E32 · M3 P33/D25/E26</p>
   </section>
 </main>
 
@@ -136,7 +158,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>steps/rev</label><input id="steps_per_rev" type="number" step="1"/></div>
       <div class="row"><label>Max step Hz</label><input id="max_step_hz" type="number" step="100"/></div>
       <div class="row"><label>Max accel</label><input id="max_accel_hz" type="number" step="100"/></div>
-      <p class="hint">Lower Max step Hz / accel = quieter. Start ~8000–12000 Hz, accel ~4000–8000.</p>
+      <p class="hint">Firmware ceiling for Max speed slider (100%). Quieter: ~8000–12000 Hz, accel ~4000–8000.</p>
       <div class="row"><label>Inv fwd</label><input id="invert_vx" type="checkbox"/></div>
       <div class="row"><label>Inv strafe</label><input id="invert_vy" type="checkbox"/></div>
       <div class="row"><label>Inv yaw</label><input id="invert_omega" type="checkbox"/></div>
@@ -162,12 +184,56 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 
 <script>
 let activePane='drive', estopLocal=false, maxStepHz=12000, lastSentActive=false, ws;
-let vx=0, vy=0, dragging=false;
-const joy=document.getElementById('joy'), knob=document.getElementById('knob');
-const yawEl=document.getElementById('yaw'), scaleEl=document.getElementById('scale');
+let mx=0, my=0, yaw=0;
+let lxM=0.19, lyM=0.195;
+let motorSign=[1,1,1,1];
 const badge=document.getElementById('wsBadge');
 const wheels=document.getElementById('wheels');
 const motorPct=[0,0,0,0];
+const maxSpeedEl=document.getElementById('maxSpeed');
+const maxSpeedVal=document.getElementById('maxSpeedVal');
+
+function bindPad(pad, knob, onChange, axisMode){
+  // axisMode: 'xy' | 'x' (yaw uses horizontal only)
+  let dragging=false;
+  function setKnob(nx,ny){
+    const r=pad.clientWidth/2, kr=knob.clientWidth/2;
+    knob.style.left=(r+nx*(r-kr))+'px';
+    knob.style.top=(r-ny*(r-kr))+'px';
+  }
+  function pointerToVec(e){
+    const rect=pad.getBoundingClientRect();
+    const cx=rect.left+rect.width/2, cy=rect.top+rect.height/2;
+    let x=(e.clientX-cx)/(rect.width/2), y=-(e.clientY-cy)/(rect.height/2);
+    if(axisMode==='x'){ y=0; }
+    const n=Math.hypot(x,y); if(n>1){x/=n;y/=n;}
+    return [x,y];
+  }
+  function down(e){dragging=true;pad.setPointerCapture(e.pointerId);move(e)}
+  function move(e){
+    if(!dragging) return;
+    const [x,y]=pointerToVec(e);
+    setKnob(x,y);
+    onChange(x,y,true);
+  }
+  function up(e){
+    dragging=false; setKnob(0,0);
+    try{pad.releasePointerCapture(e.pointerId)}catch(_){}
+    onChange(0,0,false);
+  }
+  pad.addEventListener('pointerdown',down);
+  pad.addEventListener('pointermove',move);
+  pad.addEventListener('pointerup',up);
+  pad.addEventListener('pointercancel',up);
+  setKnob(0,0);
+  return {reset(){ setKnob(0,0); onChange(0,0,false); }};
+}
+
+let moveActive=false, turnActive=false;
+const movePad=bindPad(joyMove, knobMove, (x,y,active)=>{ mx=x; my=y; moveActive=active; if(!active) pushCmd(true); }, 'xy');
+const turnPad=bindPad(joyTurn, knobTurn, (x,y,active)=>{ yaw=x; turnActive=active; if(!active) pushCmd(true); }, 'x');
+
+maxSpeedEl.oninput=()=>{ maxSpeedVal.textContent=maxSpeedEl.value+'%'; };
 
 for(let i=0;i<4;i++){
   const d=document.createElement('div');
@@ -193,45 +259,47 @@ document.querySelectorAll('.tab').forEach(btn=>{
     activePane=btn.dataset.pane;
     document.getElementById('pane-'+activePane).classList.add('active');
     if(activePane!=='motors'){ motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } pushMotors([0,0,0,0], false); }
-    if(activePane!=='drive'){ vx=0;vy=0;dragging=false;setKnob(0,0); }
+    if(activePane!=='drive'){ mx=0;my=0;yaw=0;moveActive=false;turnActive=false; movePad.reset(); turnPad.reset(); }
   };
 });
 
-function setKnob(nx,ny){
-  const r=joy.clientWidth/2, kr=knob.clientWidth/2;
-  knob.style.left=(r+nx*(r-kr))+'px';
-  knob.style.top=(r-ny*(r-kr))+'px';
-}
-function pointerToVec(e){
-  const rect=joy.getBoundingClientRect();
-  const cx=rect.left+rect.width/2, cy=rect.top+rect.height/2;
-  let x=(e.clientX-cx)/(rect.width/2), y=-(e.clientY-cy)/(rect.height/2);
-  const n=Math.hypot(x,y); if(n>1){x/=n;y/=n;}
-  return [x,y];
-}
-function onDown(e){dragging=true;joy.setPointerCapture(e.pointerId);onMove(e)}
-function onMove(e){ if(!dragging) return; const [x,y]=pointerToVec(e); vx=x; vy=y; setKnob(x,y); }
-function onUp(e){ dragging=false; vx=0; vy=0; setKnob(0,0); try{joy.releasePointerCapture(e.pointerId)}catch(_){ } pushCmd(true); }
-joy.addEventListener('pointerdown',onDown);
-joy.addEventListener('pointermove',onMove);
-joy.addEventListener('pointerup',onUp);
-joy.addEventListener('pointercancel',onUp);
-yawEl.addEventListener('change',()=>{yawEl.value=0; pushCmd(true)});
-
-const RAW_MOTORS=[[-1,-1,23.5,-14.7],[-1,1,-23.5,-14.7],[1,-1,23.5,14.7],[1,1,-23.5,14.7]];
-function nrm(x,y){const n=Math.hypot(x,y)||1; return [x/n,y/n];}
-const MOT=RAW_MOTORS.map(([dx,dy,px,py])=>{const d=nrm(dx,dy),p=nrm(px,py); return {dx:d[0],dy:d[1],px:p[0],py:p[1]};});
+/**
+ * Same IK as HolonomicKinematics.hpp (SI corners + 45° drive dirs).
+ * getDirection(sy, sx, rot): sy=forward, sx=right (Qt/web stick).
+ * Pure yaw → all four equal (M3 must match M0..M2; if not, Flip M3 in Config).
+ */
 function getDirection(dirX, dirY, rotation){
-  return MOT.map(m=> dirX*m.dx + dirY*m.dy + rotation*(m.px*m.dy - m.py*m.dx));
+  const lx=lxM, ly=lyM;
+  const corners=[[+lx,-ly],[-lx,-ly],[+lx,+ly],[-lx,+ly]];
+  const dirs=[[-1,-1],[-1,+1],[+1,-1],[+1,+1]];
+  const R=Math.hypot(lx,ly)||1;
+  return corners.map(([x,y],i)=>{
+    const dn=Math.hypot(dirs[i][0],dirs[i][1])||1;
+    const ux=dirs[i][0]/dn, uy=dirs[i][1]/dn;
+    const transl=dirX*ux + dirY*uy;
+    const rot=rotation*(x*uy - y*ux)/R;
+    return transl+rot;
+  });
 }
-function motorsFromStick(sx, sy, rot, scale){
+
+function motorsFromStick(sx, sy, rot, speedFrac){
   if(estopLocal) return [0,0,0,0];
-  return getDirection(sy*scale, sx*scale, rot*scale).map(v=>Math.round(v*maxStepHz));
+  let dirs=getDirection(sy, sx, rot);
+  const peak=Math.max(...dirs.map(v=>Math.abs(v)), 1e-9);
+  if(peak>1) dirs=dirs.map(v=>v/peak);
+  const hz=speedFrac*maxStepHz;
+  // motor_sign applied on firmware for teleop; send logical IK here
+  return dirs.map(v=>Math.round(v*hz));
 }
 function motorsFromTest(){
   if(estopLocal) return [0,0,0,0];
   const s=(+testScale.value)/100;
+  // Raw electrical sense (no IK / no motor_sign) — diagnose DIR wiring
   return motorPct.map(p=>Math.round((p/100)*s*maxStepHz));
+}
+function motorsYawSpin(speedFrac, sense){
+  // Explicit on-axis pattern from IK (all equal). sense: +1 or -1
+  return getDirection(0,0,sense).map(v=>Math.round(v*speedFrac*maxStepHz));
 }
 
 function applyOdom(m){
@@ -242,7 +310,7 @@ function applyOdom(m){
   sta.textContent=m.sta||'-'; zenoh.textContent=m.zenoh||'-';
   if(m.version) fwVer.textContent='fw '+m.version+(m.build?' ('+m.build+')':'');
   if(m.estop){ estopHint.textContent='E-STOP LATCHED — Clear E-Stop (LED double-blink)'; estopHint.style.color='var(--danger)'; }
-  else { estopHint.textContent='Hold stick for XY + yaw. Lower Scale = quieter. LED fast blink = driving.'; estopHint.style.color=''; }
+  else { estopHint.textContent='Left stick = translate. Right stick X = rotate. Max speed scales all wheel rates together.'; estopHint.style.color=''; }
   if(m.cmd_n!==undefined){
     cmdDbg.textContent=`n=${m.cmd_n}  [${(m.wheels||[]).map(v=>Math.round(v)).join(' ')}]`;
   }
@@ -250,7 +318,7 @@ function applyOdom(m){
     const hz=(m.wheels&&m.wheels[i])||0;
     const ok=!m.motor_ok||m.motor_ok[i];
     document.getElementById('w'+i).textContent=ok?Math.round(hz):'FAIL';
-    document.getElementById('wb'+i).style.width=Math.min(100,Math.abs(hz)/120)+'%';
+    document.getElementById('wb'+i).style.width=Math.min(100,(Math.abs(hz)/Math.max(maxStepHz,1))*100)+'%';
   }
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
@@ -266,8 +334,10 @@ function applyCfg(m){
   steps_per_rev.value=m.steps_per_rev;
   if(m.max_step_hz){ max_step_hz.value=m.max_step_hz; maxStepHz=+m.max_step_hz; }
   if(m.max_accel_hz) max_accel_hz.value=m.max_accel_hz;
+  if(m.lx_m) lxM=+m.lx_m; if(m.ly_m) lyM=+m.ly_m;
   invert_vx.checked=!!m.invert_vx; invert_vy.checked=!!m.invert_vy; invert_omega.checked=!!m.invert_omega;
   const ms=m.motor_sign||[1,1,1,1];
+  motorSign=ms.map(v=>v<0?-1:1);
   ms0.checked=ms[0]<0; ms1.checked=ms[1]<0; ms2.checked=ms[2]<0; ms3.checked=ms[3]<0;
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
@@ -296,22 +366,26 @@ function pushMotors(motors, testMode){
 }
 function pushCmd(forceStop){
   if(activePane!=='drive') return;
-  const s=+scaleEl.value, yaw=+yawEl.value;
-  const active=forceStop||dragging||Math.abs(yaw)>0.02;
+  const speedFrac=(+maxSpeedEl.value)/100;
+  const active=forceStop||moveActive||turnActive||Math.hypot(mx,my)>0.02||Math.abs(yaw)>0.02;
   if(!active && !lastSentActive) return;
-  const motors=active?motorsFromStick(vx,vy,yaw,s):[0,0,0,0];
+  const motors=active?motorsFromStick(mx, my, yaw, speedFrac):[0,0,0,0];
   lastSentActive=active && motors.some(v=>v!==0);
   pushMotors(motors, false);
 }
 function pushTest(force){
   if(activePane!=='motors') return;
-  const motors=motorsFromTest();
+  const speedFrac=(+testScale.value)/100;
+  let motors;
+  if(yawTest!==0) motors=motorsYawSpin(speedFrac, yawTest);
+  else motors=motorsFromTest();
   const active=force||motors.some(v=>v!==0);
   if(!active && !lastSentActive) return;
   lastSentActive=active;
-  pushMotors(active?motors:[0,0,0,0], true);
+  // Yaw IK test uses teleop path (motor_sign applied) so Flip M3 is visible
+  pushMotors(active?motors:[0,0,0,0], yawTest===0);
 }
-estop.onclick=()=>{ estopLocal=true; vx=0;vy=0;yawEl.value=0;setKnob(0,0);motorPct.fill(0);lastSentActive=false;
+estop.onclick=()=>{ estopLocal=true; mx=0;my=0;yaw=0;moveActive=false;turnActive=false;movePad.reset();turnPad.reset();motorPct.fill(0);lastSentActive=false;
   for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; }
   if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'estop'}));
   fetch('/api/estop').then(r=>r.json()).then(applyOdom);
@@ -320,11 +394,15 @@ clearEstop.onclick=()=>{ estopLocal=false;
   if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'clear_estop'}));
   fetch('/api/clear_estop').then(r=>r.json()).then(applyOdom);
 };
-stop.onclick=()=>{vx=0;vy=0;yawEl.value=0;setKnob(0,0);pushCmd(true)};
+stop.onclick=()=>{mx=0;my=0;yaw=0;moveActive=false;turnActive=false;movePad.reset();turnPad.reset();pushCmd(true)};
 resetOdom.onclick=()=>{ if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'reset_odom'})); fetch('/api/reset_odom').then(r=>r.json()).then(applyOdom); };
 testStop.onclick=()=>{ motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } pushMotors([0,0,0,0], true); lastSentActive=false; };
 testAllFwd.onclick=()=>{ for(let i=0;i<4;i++){ motorPct[i]=100; document.getElementById('msl'+i).value=100; document.getElementById('msv'+i).textContent='100%'; } };
 testAllRev.onclick=()=>{ for(let i=0;i<4;i++){ motorPct[i]=-100; document.getElementById('msl'+i).value=-100; document.getElementById('msv'+i).textContent='-100%'; } };
+let yawTest=0;
+testYawCCW.onclick=()=>{ yawTest=1; motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } };
+testYawCW.onclick=()=>{ yawTest=-1; motorPct.fill(0); for(let i=0;i<4;i++){ document.getElementById('msl'+i).value=0; document.getElementById('msv'+i).textContent='0%'; } };
+testStop.addEventListener('click',()=>{ yawTest=0; });
 
 cfgForm.onsubmit=async (e)=>{
   e.preventDefault();
@@ -350,7 +428,7 @@ otaForm.onsubmit=async (e)=>{
     otaStatus.textContent=(await r.text())+(r.ok?' — reconnect after reboot':'');
   }catch(err){ otaStatus.textContent='Error / rebooting: '+err; }
 };
-setKnob(0,0); connect();
+connect();
 fetch('/api/cfg').then(r=>r.json()).then(applyCfg).catch(()=>{});
 setInterval(()=>{ if(activePane==='drive') pushCmd(false); if(activePane==='motors') pushTest(false); }, 50);
 setInterval(()=>{ if(ws&&ws.readyState===1) return; fetch('/api/odom',{cache:'no-store'}).then(r=>r.json()).then(applyOdom).catch(()=>{}); }, 250);

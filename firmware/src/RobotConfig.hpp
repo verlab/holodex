@@ -74,7 +74,9 @@ struct RobotConfig {
         motor_sign[1] = static_cast<int8_t>(prefs.getInt("ms1", motor_sign[1]));
         motor_sign[2] = static_cast<int8_t>(prefs.getInt("ms2", motor_sign[2]));
         motor_sign[3] = static_cast<int8_t>(prefs.getInt("ms3", motor_sign[3]));
-        // v4: quieter teleop defaults + clear bad invert flags
+
+        // v4: quieter teleop defaults
+        // v7: clear polarity experiments; yaw needs clean motor_sign=+1
         const int ver = prefs.getInt("cfg_ver", 0);
         if (ver < 4) {
             invert_vx = false;
@@ -88,6 +90,19 @@ struct RobotConfig {
             prefs.putUInt("max_hz", max_step_hz);
             prefs.putUInt("max_acc", max_accel_hz);
             prefs.putInt("cfg_ver", 4);
+        }
+        if (prefs.getInt("cfg_ver", 0) < 7) {
+            motor_sign[0] = 1;
+            motor_sign[1] = 1;
+            motor_sign[2] = 1;
+            motor_sign[3] = 1;
+            invert_omega = false;
+            prefs.putInt("ms0", 1);
+            prefs.putInt("ms1", 1);
+            prefs.putInt("ms2", 1);
+            prefs.putInt("ms3", 1);
+            prefs.putBool("inv_w", false);
+            prefs.putInt("cfg_ver", 7);
         }
         prefs.end();
         return true;

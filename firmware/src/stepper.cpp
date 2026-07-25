@@ -15,10 +15,10 @@ Stepper::Stepper(int pulse_pin, int dir_pin, int enable_pin) {
         return;
     }
 
-    // Same wiring / polarity as the original Holodex firmware (Qt + Zenoh path).
-    // Enable is active-LOW on typical TB6600 / A4988 / DRV8825 drivers.
-    p_stepper->setDirectionPin(dir_pin);
-    p_stepper->setEnablePin(enable_pin /* active low */);
+    // Enable active-LOW (TB6600 / A4988 / DRV8825).
+    // DIR setup time 300 µs — needed when yaw reverses M2/M3 vs forward.
+    p_stepper->setDirectionPin(dir_pin, true /* dir high = forward */, 300);
+    p_stepper->setEnablePin(enable_pin, true /* active low */);
     p_stepper->setAutoEnable(false);
     p_stepper->setSpeedInHz(1000);
     p_stepper->setAcceleration(10000);
@@ -50,12 +50,9 @@ void Stepper::setSpeed(int32_t speed_hz, int32_t accel_hz, bool freewheel_if_zer
         return;
     }
 
-    // Match original firmware: speed==0 → stopMove every time.
     if (speed_hz == 0) {
         p_stepper->stopMove();
         commanded_hz_ = 0.0f;
-        // Motor-test: release holding torque so a single wheel can spin.
-        // Teleop: keep enabled (holding) so omni kinematics stay consistent.
         if (freewheel_if_zero) {
             p_stepper->disableOutputs();
         }
@@ -63,10 +60,7 @@ void Stepper::setSpeed(int32_t speed_hz, int32_t accel_hz, bool freewheel_if_zer
     }
 
     const bool forward = speed_hz > 0;
-    int32_t mag = speed_hz;
-    if (mag < 0) {
-        mag = -mag;
-    }
+    int32_t mag = speed_hz < 0 ? -speed_hz : speed_hz;
 
     if (accel_hz < 500) {
         accel_hz = 500;
@@ -75,8 +69,14 @@ void Stepper::setSpeed(int32_t speed_hz, int32_t accel_hz, bool freewheel_if_zer
         accel_hz = 30000;
     }
 
-    // Original loop always re-issued runForward/runBackward + applySpeedAcceleration.
-    // FastAccelStepper docs: speed changes while running need a move/run call to apply.
+    // Direction change (critical for yaw: M2/M3 reverse vs forward) — stop first
+    // so DIR is stable before pulses resume.
+    const bool was_running = commanded_hz_ != 0.0f;
+    const bool was_forward = commanded_hz_ > 0.0f;
+    if (was_running && was_forward != forward) {
+        p_stepper->stopMove();
+    }
+
     p_stepper->enableOutputs();
     p_stepper->setAcceleration(static_cast<uint32_t>(accel_hz));
     p_stepper->setSpeedInHz(static_cast<uint32_t>(mag));
