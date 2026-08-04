@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AccelGyroReader.hpp"
+#include "EncoderHub.hpp"
 #include "MotionController.hpp"
 #include "Odometry.hpp"
 #include "RobotConfig.hpp"
@@ -12,6 +14,7 @@
 #include <ArduinoJson.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
+#include <cmath>
 #include <cstring>
 
 class WebInterface {
@@ -75,6 +78,12 @@ public:
 
     void setZenohReady(bool ready) { zenoh_ready_ = ready; }
 
+    /** Optional sensors for /api/odom + WS telemetry (mux: enc ch0-3, IMU ch4). */
+    void attachSensors(AccelGyroReader* imu, bool mux_ok) {
+        imu_ = imu;
+        mux_ok_ = mux_ok;
+    }
+
     using ConfigChangedFn = void (*)(void*);
     void onConfigChanged(ConfigChangedFn fn, void* ctx) {
         cfg_cb_ = fn;
@@ -86,6 +95,8 @@ private:
     MotionController& motion_;
     Odometry& odom_;
     WifiPortal& wifi_;
+    AccelGyroReader* imu_ = nullptr;
+    bool mux_ok_ = false;
     WebServer http_;
     WebSocketsServer ws_;
     uint32_t last_broadcast_ms_ = 0;
@@ -434,18 +445,50 @@ private:
         doc["cmd_n"] = cmd_count_;
         fillApFields(doc);
         doc["driving"] = motion_.driving();
+        doc["mux"] = mux_ok_;
+
         JsonArray wheels = doc["wheels"].to<JsonArray>();
         JsonArray mok = doc["motor_ok"].to<JsonArray>();
         JsonArray eok = doc["enc_ok"].to<JsonArray>();
+        JsonArray eang = doc["enc_deg"].to<JsonArray>();
+        JsonArray ehz = doc["enc_hz"].to<JsonArray>();
         const float* applied = motion_.appliedHz();
         EncoderHub* enc = motion_.encoders();
         for (int i = 0; i < 4; ++i) {
-            // Prefer last commanded rates (immediate apply path)
             wheels.add(applied ? applied[i] : s.wheel_hz[i]);
             mok.add(motion_.motorOk(i));
-            eok.add(enc && enc->motorOk(i));
+            const bool e = enc && enc->motorOk(i);
+            eok.add(e);
+            if (e) {
+                const float deg = enc->angleDeg(i);
+                if (isnan(deg)) {
+                    eang.add(nullptr);
+                } else {
+                    eang.add(deg);
+                }
+                ehz.add(enc->lastHz(i));
+            } else {
+                eang.add(nullptr);
+                ehz.add(0.0f);
+            }
         }
         doc["enc_n"] = enc ? enc->okCount() : 0;
+        doc["enc_fresh"] = enc && enc->fresh();
+
+        const bool imu_ok = imu_ && imu_->ready();
+        doc["imu_ok"] = imu_ok;
+        if (imu_ok) {
+            constexpr float r2d = 180.0f / static_cast<float>(M_PI);
+            doc["gx"] = imu_->gyroX();
+            doc["gy"] = imu_->gyroY();
+            doc["gz"] = imu_->gyroZ();
+            doc["gx_dps"] = imu_->gyroX() * r2d;
+            doc["gy_dps"] = imu_->gyroY() * r2d;
+            doc["gz_dps"] = imu_->gyroZ() * r2d;
+            doc["ax"] = imu_->accelX();
+            doc["ay"] = imu_->accelY();
+            doc["az"] = imu_->accelZ();
+        }
         return doc;
     }
 

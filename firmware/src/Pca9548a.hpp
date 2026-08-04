@@ -23,8 +23,9 @@ public:
     }
 
     bool ready() const { return ready_; }
+    uint8_t activeChannel() const { return active_; }
 
-    /** Select one channel 0..7. Returns false on I2C error. */
+    /** Select one channel 0..7. Skips I2C write if already selected. */
     bool select(uint8_t channel) {
         if (!ready_ || channel > 7) {
             return false;
@@ -39,7 +40,8 @@ public:
             return false;
         }
         active_ = channel;
-        delayMicroseconds(200);  // bus settle after channel switch
+        // PCA9548A switch < 1 µs; short settle is enough at 400 kHz
+        delayMicroseconds(50);
         return true;
     }
 

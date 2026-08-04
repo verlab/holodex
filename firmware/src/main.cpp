@@ -167,17 +167,19 @@ void setup() {
     g_web->onConfigChanged(onConfigChanged, nullptr);
 
     Wire.begin(I2C_SDA, I2C_SCL);
-    Wire.setClock(100000);  // mux + magnetic sensors prefer 100 kHz
-    Wire.setTimeOut(50);
+    Wire.setClock(400000);  // PCA9548A / AS5600 / BMI160 all support fast-mode
+    Wire.setTimeOut(8);     // fail fast on NACK — never stall the 50 Hz loop
 
     g_imu = new AccelGyroReader();
     g_mux = new Pca9548a(Wire, MUX_I2C_ADDR);
+    bool mux_ok = false;
     if (g_mux->begin()) {
+        mux_ok = true;
         g_imu->attachMux(g_mux, MUX_CH_IMU);
         g_enc = new EncoderHub(*g_mux, g_cfg);
         if (g_enc->begin()) {
             g_motion->attachEncoders(g_enc);
-            Serial.printf("[Boot] Encoders: %d/4 AS5600 on PCA9548A\n", g_enc->okCount());
+            Serial.printf("[Boot] Encoders: %d/4 AS5600 on PCA9548A ch0-3\n", g_enc->okCount());
         } else {
             Serial.println("[Boot] Mux OK but no AS5600 — odom uses stepper speed");
         }
@@ -187,6 +189,8 @@ void setup() {
             if (!g_imu->begin()) {
                 Serial.println("[Boot] IMU optional — continuing without gyro fusion");
             }
+        } else {
+            Serial.println("[Boot] BMI160 on PCA9548A ch4");
         }
     } else {
         delete g_mux;
@@ -196,6 +200,7 @@ void setup() {
             Serial.println("[Boot] IMU optional — continuing without gyro fusion");
         }
     }
+    g_web->attachSensors(g_imu, mux_ok);
 
     g_last_ctrl_ms = millis();
     Serial.println("[Boot] LED: slow=idle  fast=driving  double=ESTOP  flicker=OTA");
@@ -235,12 +240,16 @@ void loop() {
         return;
     }
 
-    // Control / odom @ 50 Hz. IMU read at the same rate (was 10 Hz with 20 ms dt).
+    // Control / sensors / odom @ 50 Hz.
+    // One mux sweep per tick: AS5600 ch0..3 then BMI160 ch4 (no disableAll).
     const uint32_t dt_ms = now - g_last_ctrl_ms;
     if (dt_ms >= 20) {
         const float dt_s = dt_ms * 0.001f;
         g_last_ctrl_ms = now;
 
+        if (g_enc) {
+            g_enc->sample();
+        }
         if (g_imu && g_imu->ready()) {
             if (g_imu->read()) {
                 g_gyro_z = g_imu->gyroZ();  // rad/s

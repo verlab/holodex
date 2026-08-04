@@ -290,15 +290,14 @@ private:
     }
 
     /**
-     * Wheel rates for odometry: AS5600 when present, else FAS current speed.
+     * Wheel rates for odometry: cached AS5600 sample (from main tick), else FAS.
      * Output is logical IK frame (motor_sign undone for FAS).
      */
-    void readMeasuredLogicalHz(float out[4]) {
-        float enc_hz[4] = {};
-        const bool have_enc = enc_ && enc_->okCount() > 0 && enc_->update(enc_hz);
+    void readMeasuredLogicalHz(float out[4]) const {
+        const bool use_enc = enc_ && enc_->fresh();
         for (int i = 0; i < 4; ++i) {
-            if (have_enc && enc_->motorOk(i)) {
-                out[i] = enc_hz[i];
+            if (use_enc && enc_->motorOk(i)) {
+                out[i] = enc_->lastHz(i);
                 continue;
             }
             float h = 0.0f;

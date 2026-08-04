@@ -114,8 +114,21 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
     <div class="row"><label>Cmd</label><span id="cmdDbg">-</span></div>
     <div class="row"><label>STA</label><span id="sta">-</span></div>
     <div class="row"><label>Zenoh</label><span id="zenoh">-</span></div>
-    <h2 style="margin-top:14px">Wheel rates (Hz)</h2>
+    <h2 style="margin-top:14px">Cmd wheel rates (Hz)</h2>
     <div id="wheels" class="metrics"></div>
+    <h2 style="margin-top:14px">Encoders · AS5600 <span id="encBadge" class="badge off">—</span></h2>
+    <div id="encoders" class="metrics"></div>
+    <p class="hint" id="encHint">Mux ch0–3 · angle + measured Hz (odom source when fresh)</p>
+    <h2 style="margin-top:14px">IMU · BMI160 <span id="imuBadge" class="badge off">—</span></h2>
+    <div class="metrics">
+      <div class="metric"><small>gx (°/s)</small><b id="igx">—</b></div>
+      <div class="metric"><small>gy (°/s)</small><b id="igy">—</b></div>
+      <div class="metric"><small>gz (°/s)</small><b id="igz">—</b></div>
+      <div class="metric"><small>ax (m/s²)</small><b id="iax">—</b></div>
+      <div class="metric"><small>ay (m/s²)</small><b id="iay">—</b></div>
+      <div class="metric"><small>az (m/s²)</small><b id="iaz">—</b></div>
+    </div>
+    <p class="hint" id="imuHint">Mux ch4 · yaw fusion uses gz (rad/s internally)</p>
   </section>
 </main>
 
@@ -190,6 +203,7 @@ let lxM=0.19, lyM=0.195;
 let motorSign=[1,1,1,1];
 const badge=document.getElementById('wsBadge');
 const wheels=document.getElementById('wheels');
+const encoders=document.getElementById('encoders');
 const motorPct=[0,0,0,0];
 const maxSpeedEl=document.getElementById('maxSpeed');
 const maxSpeedVal=document.getElementById('maxSpeedVal');
@@ -241,6 +255,10 @@ for(let i=0;i<4;i++){
   d.className='metric';
   d.innerHTML=`<small>M${i}</small><b id="w${i}">0</b><div class="bar"><i id="wb${i}"></i></div>`;
   wheels.appendChild(d);
+  const e=document.createElement('div');
+  e.className='metric';
+  e.innerHTML=`<small>E${i}</small><b id="ea${i}">—</b><small id="eh${i}" style="display:block;margin-top:2px">0 Hz</small><div class="bar"><i id="eb${i}"></i></div>`;
+  encoders.appendChild(e);
   const row=document.createElement('div');
   row.className='motor-row';
   row.innerHTML=`<div class="row"><label>M${i}</label><input id="msl${i}" type="range" min="-100" max="100" step="1" value="0"/><span class="val" id="msv${i}">0%</span></div>`;
@@ -320,6 +338,32 @@ function applyOdom(m){
     document.getElementById('w'+i).textContent=ok?Math.round(hz):'FAIL';
     document.getElementById('wb'+i).style.width=Math.min(100,(Math.abs(hz)/Math.max(maxStepHz,1))*100)+'%';
   }
+  const encN=m.enc_n|0;
+  encBadge.textContent=m.mux?(encN+'/4'+(m.enc_fresh?' live':' —')):(encN?'bus':'no mux');
+  encBadge.className='badge '+(encN>0?'on':'off');
+  encHint.textContent=m.mux
+    ?`Mux ch0–3 · ${encN}/4 OK · odom uses encoder Hz when fresh, else stepper ramp`
+    :`No PCA9548A · encoders unavailable · odom uses stepper ramp`;
+  for(let i=0;i<4;i++){
+    const ok=m.enc_ok&&m.enc_ok[i];
+    const deg=(m.enc_deg&&m.enc_deg[i]!=null)?Number(m.enc_deg[i]):NaN;
+    const ehz=(m.enc_hz&&m.enc_hz[i])||0;
+    document.getElementById('ea'+i).textContent=ok&&!Number.isNaN(deg)?deg.toFixed(1)+'°':'—';
+    document.getElementById('eh'+i).textContent=ok?Math.round(ehz)+' Hz':'no sensor';
+    document.getElementById('eb'+i).style.width=ok?Math.min(100,(Math.abs(ehz)/Math.max(maxStepHz,1))*100)+'%':'0%';
+  }
+  imuBadge.textContent=m.imu_ok?(m.mux?'mux ch4':'ok'):'down';
+  imuBadge.className='badge '+(m.imu_ok?'on':'off');
+  imuHint.textContent=m.imu_ok
+    ?`gz ${Number(m.gz||0).toFixed(3)} rad/s · yaw fusion active`
+    :`IMU down · yaw from wheel FK`;
+  const fmt=(v,d)=> (v==null||Number.isNaN(Number(v)))?'—':Number(v).toFixed(d);
+  igx.textContent=m.imu_ok?fmt(m.gx_dps,1):'—';
+  igy.textContent=m.imu_ok?fmt(m.gy_dps,1):'—';
+  igz.textContent=m.imu_ok?fmt(m.gz_dps,1):'—';
+  iax.textContent=m.imu_ok?fmt(m.ax,2):'—';
+  iay.textContent=m.imu_ok?fmt(m.ay,2):'—';
+  iaz.textContent=m.imu_ok?fmt(m.az,2):'—';
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
   if(m.ap_url) apUrl.textContent=m.ap_url;
