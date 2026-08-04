@@ -141,6 +141,7 @@ public:
             }
             last_hz_[i] = 0.0f;
             applied_hz_[i] = 0.0f;
+            speed_i_[i] = 0.0f;
         }
         active_source_ = CmdSource::None;
         Serial.println("[ESTOP] latched");
@@ -152,8 +153,14 @@ public:
         web_cmd_ = {};
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
+        for (int i = 0; i < 4; ++i) {
+            speed_i_[i] = 0.0f;
+        }
         Serial.println("[ESTOP] cleared");
     }
+
+    /** Odom wheel-rate source hint for UI: enc / fas / mix. */
+    const char* wheelMeasureSrc() const { return measure_src_; }
 
     bool estop() const { return estop_; }
     bool driving() const {
@@ -210,12 +217,24 @@ public:
             active_source_ = CmdSource::None;
             mode_ = Mode::Idle;
             raw_test_mode_ = false;
+            for (int i = 0; i < 4; ++i) {
+                speed_i_[i] = 0.0f;
+            }
+        }
+
+        // Closed-loop speed assist: correct command toward encoder-measured rate
+        if (!freewheel && cfg_.enc_speed_fb && enc_ && enc_->fresh() &&
+            active_source_ != CmdSource::None) {
+            applySpeedFeedback(cmd_hz, dt_s);
+        } else if (active_source_ == CmdSource::None) {
+            for (int i = 0; i < 4; ++i) {
+                speed_i_[i] = 0.0f;
+            }
         }
 
         applyWheelHz(cmd_hz, freewheel);
         copyHz(cmd_hz);
 
-        // Prefer AS5600 wheel rates; fall back to FastAccelStepper ramp speed
         float measured[4] = {};
         readMeasuredLogicalHz(measured);
         odom_.update(measured, dt_s, gyro_z, gyro_valid, now_ms);
@@ -242,10 +261,31 @@ private:
     float move_tx_ = 0.0f;
     float move_ty_ = 0.0f;
     float move_speed_ = 0.2f;
+    float speed_i_[4] = {};
+    const char* measure_src_ = "fas";
 
     void cancelMove() {
         if (mode_ == Mode::MoveTo) {
             mode_ = Mode::Idle;
+        }
+    }
+
+    /** PI on logical Hz: cmd += Kp*(cmd - enc) + Ki*∫ — helps slip / load. */
+    void applySpeedFeedback(float cmd_hz[4], float dt_s) {
+        constexpr float kP = 0.25f;
+        constexpr float kI = 0.8f;
+        const float i_lim = 0.25f * static_cast<float>(cfg_.max_step_hz);
+        for (int i = 0; i < 4; ++i) {
+            if (!enc_->motorOk(i)) {
+                speed_i_[i] *= 0.9f;
+                continue;
+            }
+            const float meas = enc_->lastHz(i);
+            const float err = cmd_hz[i] - meas;
+            speed_i_[i] = clampf(speed_i_[i] + err * dt_s, -i_lim, i_lim);
+            float out = cmd_hz[i] + kP * err + kI * speed_i_[i];
+            const float lim = static_cast<float>(cfg_.max_step_hz);
+            cmd_hz[i] = clampf(out, -lim, lim);
         }
     }
 
@@ -290,25 +330,40 @@ private:
     }
 
     /**
-     * Wheel rates for odometry: cached AS5600 sample (from main tick), else FAS.
-     * Output is logical IK frame (motor_sign undone for FAS).
+     * Wheel rates for odometry in logical IK frame.
+     * Blends AS5600 (mapped motor←mux ch) with FastAccelStepper ramp speed.
      */
-    void readMeasuredLogicalHz(float out[4]) const {
-        const bool use_enc = enc_ && enc_->fresh();
+    void readMeasuredLogicalHz(float out[4]) {
+        int n_enc = 0;
+        int n_fas = 0;
+        const bool enc_fresh = enc_ && enc_->fresh();
+        const float a = cfg_.enc_blend;
         for (int i = 0; i < 4; ++i) {
-            if (use_enc && enc_->motorOk(i)) {
-                out[i] = enc_->lastHz(i);
-                continue;
-            }
-            float h = 0.0f;
+            float fas = 0.0f;
             if (motors_[i] && motors_[i]->ok()) {
-                h = motors_[i]->getCurrentSpeedHz();
+                fas = motors_[i]->getCurrentSpeedHz();
                 if (cfg_.motor_sign[i] < 0) {
-                    h = -h;
+                    fas = -fas;
                 }
             }
-            out[i] = h;
+            const bool have_enc = enc_fresh && enc_->motorOk(i) && cfg_.enc_odom;
+            if (have_enc) {
+                const float e = enc_->lastHz(i);
+                out[i] = a * e + (1.0f - a) * fas;
+                n_enc++;
+            } else {
+                out[i] = fas;
+                n_fas++;
+            }
         }
+        if (n_enc == 4) {
+            measure_src_ = (a > 0.99f) ? "enc" : "mix";
+        } else if (n_enc > 0) {
+            measure_src_ = "mix";
+        } else {
+            measure_src_ = "fas";
+        }
+        (void)n_fas;
     }
 
     static float clampf(float v, float lo, float hi) {

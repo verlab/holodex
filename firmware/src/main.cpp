@@ -125,6 +125,9 @@ static void onConfigChanged(void* /*ctx*/) {
     if (g_kin) {
         g_kin->setConfig(g_cfg);
     }
+    if (g_enc) {
+        g_enc->logMap();
+    }
     if (g_zenoh) {
         delete g_zenoh;
         g_zenoh = nullptr;
@@ -159,7 +162,7 @@ void setup() {
     g_motors[3] = new Stepper(PULSE_PIN4, DIR_PIN4, ENA_PIN4);
 
     g_kin = new HolonomicKinematics(g_cfg);
-    g_odom = new Odometry(*g_kin);
+    g_odom = new Odometry(*g_kin, g_cfg);
     g_motion = new MotionController(g_cfg, g_motors, *g_kin, *g_odom);
 
     g_web = new WebInterface(g_cfg, *g_motion, *g_odom, *g_wifi);

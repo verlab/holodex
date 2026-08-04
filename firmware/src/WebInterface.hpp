@@ -368,6 +368,36 @@ private:
                 cfg_.motor_sign[i] = (v < 0) ? -1 : 1;
             }
         }
+        if (doc["enc_ch"].is<JsonArray>()) {
+            JsonArray arr = doc["enc_ch"].as<JsonArray>();
+            for (int i = 0; i < 4 && i < static_cast<int>(arr.size()); ++i) {
+                cfg_.enc_ch[i] = RobotConfig::clampEncCh(arr[i].as<int>());
+            }
+        }
+        if (doc["enc_sign"].is<JsonArray>()) {
+            JsonArray arr = doc["enc_sign"].as<JsonArray>();
+            for (int i = 0; i < 4 && i < static_cast<int>(arr.size()); ++i) {
+                cfg_.enc_sign[i] = (arr[i].as<int>() < 0) ? -1 : 1;
+            }
+        }
+        if (!doc["enc_odom"].isNull()) {
+            cfg_.enc_odom = doc["enc_odom"].as<bool>();
+        }
+        if (!doc["enc_speed_fb"].isNull()) {
+            cfg_.enc_speed_fb = doc["enc_speed_fb"].as<bool>();
+        }
+        if (!doc["enc_blend"].isNull()) {
+            float b = doc["enc_blend"].as<float>();
+            if (b < 0.0f) {
+                b = 0.0f;
+            } else if (b > 1.0f) {
+                b = 1.0f;
+            }
+            cfg_.enc_blend = b;
+        }
+        if (!doc["yaw_kalman"].isNull()) {
+            cfg_.yaw_kalman = doc["yaw_kalman"].as<bool>();
+        }
         cfg_.save();
         if (cfg_cb_) {
             cfg_cb_(cfg_ctx_);
@@ -414,9 +444,17 @@ private:
         doc["invert_vy"] = cfg_.invert_vy;
         doc["invert_omega"] = cfg_.invert_omega;
         JsonArray ms = doc["motor_sign"].to<JsonArray>();
+        JsonArray ech = doc["enc_ch"].to<JsonArray>();
+        JsonArray es = doc["enc_sign"].to<JsonArray>();
         for (int i = 0; i < 4; ++i) {
             ms.add(cfg_.motor_sign[i]);
+            ech.add(cfg_.enc_ch[i]);
+            es.add(cfg_.enc_sign[i]);
         }
+        doc["enc_odom"] = cfg_.enc_odom;
+        doc["enc_speed_fb"] = cfg_.enc_speed_fb;
+        doc["enc_blend"] = cfg_.enc_blend;
+        doc["yaw_kalman"] = cfg_.yaw_kalman;
         fillApFields(doc);
         return doc;
     }
@@ -474,6 +512,13 @@ private:
         }
         doc["enc_n"] = enc ? enc->okCount() : 0;
         doc["enc_fresh"] = enc && enc->fresh();
+        doc["wheel_src"] = motion_.wheelMeasureSrc();
+        doc["odom_fusion"] = odom_.fusionMode();
+        doc["gyro_bias"] = odom_.gyroBias();
+        JsonArray ech = doc["enc_ch"].to<JsonArray>();
+        for (int i = 0; i < 4; ++i) {
+            ech.add(cfg_.enc_ch[i]);
+        }
 
         const bool imu_ok = imu_ && imu_->ready();
         doc["imu_ok"] = imu_ok;

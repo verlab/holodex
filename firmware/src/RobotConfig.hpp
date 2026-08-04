@@ -44,6 +44,25 @@ struct RobotConfig {
     bool invert_omega = false;
     int8_t motor_sign[4] = {1, 1, 1, 1};  // set -1 to flip an individual wheel
 
+    // AS5600 on PCA9548A: which mux channel feeds motor Mi, and shaft polarity
+    int8_t enc_ch[4] = {0, 1, 2, 3};   // mux ch 0..3 for M0..M3
+    int8_t enc_sign[4] = {1, 1, 1, 1}; // -1 if magnet/mount is flipped vs IK
+    bool enc_odom = true;              // prefer encoder rates for odometry
+    bool enc_speed_fb = true;          // PI speed assist from encoder vs command
+    float enc_blend = 0.85f;           // weight of encoder vs FAS when both exist
+    bool yaw_kalman = true;            // fuse gyro + wheel omega for heading
+
+    /** Clamp encoder mux channel to 0..3. */
+    static int8_t clampEncCh(int v) {
+        if (v < 0) {
+            return 0;
+        }
+        if (v > 3) {
+            return 3;
+        }
+        return static_cast<int8_t>(v);
+    }
+
     bool load() {
         Preferences prefs;
         // RW open creates the NVS namespace on first boot (avoids NOT_FOUND spam)
@@ -74,9 +93,27 @@ struct RobotConfig {
         motor_sign[1] = static_cast<int8_t>(prefs.getInt("ms1", motor_sign[1]));
         motor_sign[2] = static_cast<int8_t>(prefs.getInt("ms2", motor_sign[2]));
         motor_sign[3] = static_cast<int8_t>(prefs.getInt("ms3", motor_sign[3]));
+        enc_ch[0] = clampEncCh(prefs.getInt("ech0", enc_ch[0]));
+        enc_ch[1] = clampEncCh(prefs.getInt("ech1", enc_ch[1]));
+        enc_ch[2] = clampEncCh(prefs.getInt("ech2", enc_ch[2]));
+        enc_ch[3] = clampEncCh(prefs.getInt("ech3", enc_ch[3]));
+        enc_sign[0] = static_cast<int8_t>(prefs.getInt("es0", enc_sign[0]) < 0 ? -1 : 1);
+        enc_sign[1] = static_cast<int8_t>(prefs.getInt("es1", enc_sign[1]) < 0 ? -1 : 1);
+        enc_sign[2] = static_cast<int8_t>(prefs.getInt("es2", enc_sign[2]) < 0 ? -1 : 1);
+        enc_sign[3] = static_cast<int8_t>(prefs.getInt("es3", enc_sign[3]) < 0 ? -1 : 1);
+        enc_odom = prefs.getBool("enc_odom", enc_odom);
+        enc_speed_fb = prefs.getBool("enc_fb", enc_speed_fb);
+        enc_blend = prefs.getFloat("enc_bl", enc_blend);
+        if (enc_blend < 0.0f) {
+            enc_blend = 0.0f;
+        } else if (enc_blend > 1.0f) {
+            enc_blend = 1.0f;
+        }
+        yaw_kalman = prefs.getBool("yaw_kf", yaw_kalman);
 
         // v4: quieter teleop defaults
         // v7: clear polarity experiments; yaw needs clean motor_sign=+1
+        // v8: encoder map / fusion defaults
         const int ver = prefs.getInt("cfg_ver", 0);
         if (ver < 4) {
             invert_vx = false;
@@ -103,6 +140,30 @@ struct RobotConfig {
             prefs.putInt("ms3", 1);
             prefs.putBool("inv_w", false);
             prefs.putInt("cfg_ver", 7);
+        }
+        if (prefs.getInt("cfg_ver", 0) < 8) {
+            enc_ch[0] = 0;
+            enc_ch[1] = 1;
+            enc_ch[2] = 2;
+            enc_ch[3] = 3;
+            enc_sign[0] = enc_sign[1] = enc_sign[2] = enc_sign[3] = 1;
+            enc_odom = true;
+            enc_speed_fb = true;
+            enc_blend = 0.85f;
+            yaw_kalman = true;
+            prefs.putInt("ech0", 0);
+            prefs.putInt("ech1", 1);
+            prefs.putInt("ech2", 2);
+            prefs.putInt("ech3", 3);
+            prefs.putInt("es0", 1);
+            prefs.putInt("es1", 1);
+            prefs.putInt("es2", 1);
+            prefs.putInt("es3", 1);
+            prefs.putBool("enc_odom", true);
+            prefs.putBool("enc_fb", true);
+            prefs.putFloat("enc_bl", 0.85f);
+            prefs.putBool("yaw_kf", true);
+            prefs.putInt("cfg_ver", 8);
         }
         prefs.end();
         return true;
@@ -136,6 +197,18 @@ struct RobotConfig {
         prefs.putInt("ms1", motor_sign[1]);
         prefs.putInt("ms2", motor_sign[2]);
         prefs.putInt("ms3", motor_sign[3]);
+        prefs.putInt("ech0", enc_ch[0]);
+        prefs.putInt("ech1", enc_ch[1]);
+        prefs.putInt("ech2", enc_ch[2]);
+        prefs.putInt("ech3", enc_ch[3]);
+        prefs.putInt("es0", enc_sign[0]);
+        prefs.putInt("es1", enc_sign[1]);
+        prefs.putInt("es2", enc_sign[2]);
+        prefs.putInt("es3", enc_sign[3]);
+        prefs.putBool("enc_odom", enc_odom);
+        prefs.putBool("enc_fb", enc_speed_fb);
+        prefs.putFloat("enc_bl", enc_blend);
+        prefs.putBool("yaw_kf", yaw_kalman);
         prefs.end();
         return true;
     }

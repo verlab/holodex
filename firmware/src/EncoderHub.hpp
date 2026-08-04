@@ -8,13 +8,11 @@
 /**
  * 4× AS5600 on PCA9548A channels 0..3.
  *
- * Call sample() once per control tick; odometry/UI read cached values.
- * Leaves the mux on the last encoder channel (IMU selects ch4 next).
+ * Config maps mux channel → motor (enc_ch[Mi]) and shaft polarity (enc_sign).
+ * Call sample() once per control tick; odometry/UI read motor-indexed cache.
  */
 class EncoderHub {
 public:
-    static constexpr uint8_t kMuxCh[4] = {0, 1, 2, 3};
-
     EncoderHub(Pca9548a& mux, RobotConfig& cfg, TwoWire& wire = Wire)
         : mux_(mux),
           cfg_(cfg),
@@ -22,34 +20,62 @@ public:
           enc_{As5600(wire), As5600(wire), As5600(wire), As5600(wire)} {}
 
     bool begin() {
-        ok_count_ = 0;
-        for (int i = 0; i < 4; ++i) {
-            enc_ok_[i] = false;
-            if (!mux_.select(kMuxCh[i])) {
-                Serial.printf("[ENC] M%d mux select failed\n", i);
+        ch_ok_count_ = 0;
+        for (int ch = 0; ch < 4; ++ch) {
+            ch_ok_[ch] = false;
+            if (!mux_.select(static_cast<uint8_t>(ch))) {
+                Serial.printf("[ENC] mux ch%u select failed\n", ch);
                 continue;
             }
-            if (!enc_[i].begin()) {
-                Serial.printf("[ENC] M%d AS5600 not found on mux ch%u\n", i, kMuxCh[i]);
+            if (!enc_[ch].begin()) {
+                Serial.printf("[ENC] AS5600 not found on mux ch%u\n", ch);
                 continue;
             }
-            enc_[i].syncPrev();
-            enc_ok_[i] = true;
-            ok_count_++;
-            Serial.printf("[ENC] M%d AS5600 OK (ch%u)\n", i, kMuxCh[i]);
+            enc_[ch].syncPrev();
+            ch_ok_[ch] = true;
+            ch_ok_count_++;
+            Serial.printf("[ENC] AS5600 OK on mux ch%u\n", ch);
         }
         last_us_ = micros();
-        return ok_count_ > 0;
+        logMap();
+        return ch_ok_count_ > 0;
     }
 
-    int okCount() const { return ok_count_; }
-    bool motorOk(int i) const { return i >= 0 && i < 4 && enc_ok_[i]; }
+    void logMap() const {
+        Serial.printf("[ENC] map M0←ch%u%s  M1←ch%u%s  M2←ch%u%s  M3←ch%u%s\n",
+                      static_cast<unsigned>(cfg_.enc_ch[0]), cfg_.enc_sign[0] < 0 ? "-" : "+",
+                      static_cast<unsigned>(cfg_.enc_ch[1]), cfg_.enc_sign[1] < 0 ? "-" : "+",
+                      static_cast<unsigned>(cfg_.enc_ch[2]), cfg_.enc_sign[2] < 0 ? "-" : "+",
+                      static_cast<unsigned>(cfg_.enc_ch[3]), cfg_.enc_sign[3] < 0 ? "-" : "+");
+    }
+
+    int okCount() const {
+        int n = 0;
+        for (int m = 0; m < 4; ++m) {
+            if (motorOk(m)) {
+                n++;
+            }
+        }
+        return n;
+    }
+    int channelsOk() const { return ch_ok_count_; }
+    bool channelOk(int ch) const { return ch >= 0 && ch < 4 && ch_ok_[ch]; }
+
+    /** True if motor Mi has a live AS5600 on its configured mux channel. */
+    bool motorOk(int motor) const {
+        if (motor < 0 || motor > 3) {
+            return false;
+        }
+        const int ch = RobotConfig::clampEncCh(cfg_.enc_ch[motor]);
+        return ch_ok_[ch];
+    }
+
     bool fresh() const { return fresh_; }
     uint32_t lastSampleUs() const { return last_us_; }
 
     /**
-     * Read all live encoders once. Updates angle_rad_ / enc_hz_ cache.
-     * @return true if at least one encoder produced a sample.
+     * Read all mux channels that are mapped to at least one motor.
+     * Fills motor-indexed angle_rad_ / enc_hz_ (logical IK frame).
      */
     bool sample() {
         const uint32_t now = micros();
@@ -57,66 +83,107 @@ public:
         if (dt < 1e-4f) {
             dt = 1e-4f;
         } else if (dt > 0.1f) {
-            // First sample / stall — sync unwrap, skip rate this tick
-            for (int i = 0; i < 4; ++i) {
-                if (enc_ok_[i] && mux_.select(kMuxCh[i])) {
-                    float ang = 0.0f;
-                    if (enc_[i].readAngleRad(ang)) {
-                        angle_rad_[i] = ang;
-                        enc_[i].syncPrev();
-                    }
+            for (int ch = 0; ch < 4; ++ch) {
+                if (!ch_ok_[ch]) {
+                    continue;
+                }
+                if (!mux_.select(static_cast<uint8_t>(ch))) {
+                    continue;
+                }
+                float ang = 0.0f;
+                if (enc_[ch].readAngleRad(ang)) {
+                    ch_angle_[ch] = ang;
+                    enc_[ch].syncPrev();
                 }
             }
+            float z[4] = {};
+            publishMotorsFromChannels(z, /*rates=*/false);
             last_us_ = now;
             fresh_ = false;
             return false;
         }
         last_us_ = now;
 
-        bool any = false;
-        for (int i = 0; i < 4; ++i) {
-            if (!enc_ok_[i]) {
+        bool any_ch = false;
+        float ch_hz[4] = {};
+        for (int ch = 0; ch < 4; ++ch) {
+            if (!ch_ok_[ch]) {
                 continue;
             }
-            if (!mux_.select(kMuxCh[i])) {
+            // Skip unused channels to save I2C time
+            if (!channelMapped(ch)) {
+                continue;
+            }
+            if (!mux_.select(static_cast<uint8_t>(ch))) {
                 continue;
             }
             float ang = 0.0f;
-            if (!enc_[i].readAngleRad(ang)) {
+            if (!enc_[ch].readAngleRad(ang)) {
                 continue;
             }
-            angle_rad_[i] = ang;
-            const float dtheta = enc_[i].consumeDeltaRad();
-            const float omega = dtheta / dt;
-            float hz = (omega / (2.0f * static_cast<float>(M_PI))) * cfg_.steps_per_rev;
-            if (cfg_.motor_sign[i] < 0) {
-                hz = -hz;
-            }
-            enc_hz_[i] = hz;
-            any = true;
+            ch_angle_[ch] = ang;
+            const float dtheta = enc_[ch].consumeDeltaRad();
+            ch_hz[ch] = (dtheta / dt) / (2.0f * static_cast<float>(M_PI)) * cfg_.steps_per_rev;
+            any_ch = true;
         }
-        fresh_ = any;
-        return any;
+
+        publishMotorsFromChannels(ch_hz, /*rates=*/true);
+        fresh_ = any_ch && okCount() > 0;
+        return fresh_;
     }
 
-    float angleRad(int i) const {
-        return (i >= 0 && i < 4) ? angle_rad_[i] : NAN;
+    float angleRad(int motor) const {
+        return (motor >= 0 && motor < 4) ? angle_rad_[motor] : NAN;
     }
-    float angleDeg(int i) const {
-        const float r = angleRad(i);
+    float angleDeg(int motor) const {
+        const float r = angleRad(motor);
         return isnan(r) ? NAN : (r * 180.0f / static_cast<float>(M_PI));
     }
-    float lastHz(int i) const { return (i >= 0 && i < 4) ? enc_hz_[i] : 0.0f; }
+    float lastHz(int motor) const {
+        return (motor >= 0 && motor < 4) ? enc_hz_[motor] : 0.0f;
+    }
+    int muxChannel(int motor) const {
+        return (motor >= 0 && motor < 4) ? RobotConfig::clampEncCh(cfg_.enc_ch[motor]) : -1;
+    }
 
 private:
     Pca9548a& mux_;
     RobotConfig& cfg_;
     TwoWire& wire_;
     As5600 enc_[4];
-    bool enc_ok_[4] = {};
-    int ok_count_ = 0;
+    bool ch_ok_[4] = {};
+    int ch_ok_count_ = 0;
     bool fresh_ = false;
+    float ch_angle_[4] = {NAN, NAN, NAN, NAN};
     float angle_rad_[4] = {NAN, NAN, NAN, NAN};
     float enc_hz_[4] = {};
     uint32_t last_us_ = 0;
+
+    bool channelMapped(int ch) const {
+        for (int m = 0; m < 4; ++m) {
+            if (RobotConfig::clampEncCh(cfg_.enc_ch[m]) == ch) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void publishMotorsFromChannels(const float ch_hz[4], bool rates) {
+        for (int m = 0; m < 4; ++m) {
+            const int ch = RobotConfig::clampEncCh(cfg_.enc_ch[m]);
+            if (!ch_ok_[ch]) {
+                angle_rad_[m] = NAN;
+                enc_hz_[m] = 0.0f;
+                continue;
+            }
+            angle_rad_[m] = ch_angle_[ch];
+            if (rates) {
+                float hz = ch_hz[ch];
+                if (cfg_.enc_sign[m] < 0) {
+                    hz = -hz;
+                }
+                enc_hz_[m] = hz;
+            }
+        }
+    }
 };

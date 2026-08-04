@@ -111,6 +111,8 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="metric"><small>ω</small><b id="ow">0.00</b></div>
     </div>
     <div class="row" style="margin-top:12px"><label>Src</label><b id="src">none</b></div>
+    <div class="row"><label>Odom</label><span id="odomFusion">-</span></div>
+    <div class="row"><label>Wheels</label><span id="wheelSrc">-</span></div>
     <div class="row"><label>Cmd</label><span id="cmdDbg">-</span></div>
     <div class="row"><label>STA</label><span id="sta">-</span></div>
     <div class="row"><label>Zenoh</label><span id="zenoh">-</span></div>
@@ -184,6 +186,26 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
           <input id="ms3" type="checkbox"/>3
         </span>
       </div>
+
+      <h2 style="margin-top:18px">Encoders · PCA9548A map</h2>
+      <p class="hint">Which mux channel (AS5600) belongs to each motor. Flip if shaft sense is inverted vs IK.</p>
+      <div class="row"><label>M0 ← ch</label><input id="ech0" type="number" min="0" max="3" step="1"/></div>
+      <div class="row"><label>M1 ← ch</label><input id="ech1" type="number" min="0" max="3" step="1"/></div>
+      <div class="row"><label>M2 ← ch</label><input id="ech2" type="number" min="0" max="3" step="1"/></div>
+      <div class="row"><label>M3 ← ch</label><input id="ech3" type="number" min="0" max="3" step="1"/></div>
+      <div class="row"><label>Flip enc</label>
+        <span>
+          <input id="es0" type="checkbox"/>0
+          <input id="es1" type="checkbox"/>1
+          <input id="es2" type="checkbox"/>2
+          <input id="es3" type="checkbox"/>3
+        </span>
+      </div>
+      <div class="row"><label>Enc odom</label><input id="enc_odom" type="checkbox"/></div>
+      <div class="row"><label>Speed FB</label><input id="enc_speed_fb" type="checkbox"/></div>
+      <div class="row"><label>Enc blend</label><input id="enc_blend" type="number" min="0" max="1" step="0.05"/></div>
+      <div class="row"><label>Yaw Kalman</label><input id="yaw_kalman" type="checkbox"/></div>
+      <p class="hint">Enc odom: AS5600 rates for pose (blend with stepper). Speed FB: PI corrects motor cmd vs encoder. Yaw Kalman: gyro + wheel ω → heading/bias.</p>
       <div class="btns"><button class="ok" type="submit">Save &amp; apply</button></div>
     </form>
 
@@ -257,7 +279,7 @@ for(let i=0;i<4;i++){
   wheels.appendChild(d);
   const e=document.createElement('div');
   e.className='metric';
-  e.innerHTML=`<small>E${i}</small><b id="ea${i}">—</b><small id="eh${i}" style="display:block;margin-top:2px">0 Hz</small><div class="bar"><i id="eb${i}"></i></div>`;
+  e.innerHTML=`<small id="el${i}">M${i}←ch?</small><b id="ea${i}">—</b><small id="eh${i}" style="display:block;margin-top:2px">0 Hz</small><div class="bar"><i id="eb${i}"></i></div>`;
   encoders.appendChild(e);
   const row=document.createElement('div');
   row.className='motor-row';
@@ -325,6 +347,8 @@ function applyOdom(m){
   oth.textContent=(Number(m.theta||0)*180/Math.PI).toFixed(1);
   ovx.textContent=Number(m.vx||0).toFixed(2); ovy.textContent=Number(m.vy||0).toFixed(2); ow.textContent=Number(m.omega||0).toFixed(2);
   src.textContent=m.estop?'ESTOP':(m.driving?'DRIVE':(m.source||'none'));
+  odomFusion.textContent=(m.odom_fusion||'-')+(m.gyro_bias!=null?' · bias '+Number(m.gyro_bias).toFixed(4):'');
+  wheelSrc.textContent=m.wheel_src||'-';
   sta.textContent=m.sta||'-'; zenoh.textContent=m.zenoh||'-';
   if(m.version) fwVer.textContent='fw '+m.version+(m.build?' ('+m.build+')':'');
   if(m.estop){ estopHint.textContent='E-STOP LATCHED — Clear E-Stop (LED double-blink)'; estopHint.style.color='var(--danger)'; }
@@ -346,6 +370,8 @@ function applyOdom(m){
     :`No PCA9548A · encoders unavailable · odom uses stepper ramp`;
   for(let i=0;i<4;i++){
     const ok=m.enc_ok&&m.enc_ok[i];
+    const ch=(m.enc_ch&&m.enc_ch[i]!=null)?m.enc_ch[i]:i;
+    document.getElementById('el'+i).textContent=`M${i}←ch${ch}`;
     const deg=(m.enc_deg&&m.enc_deg[i]!=null)?Number(m.enc_deg[i]):NaN;
     const ehz=(m.enc_hz&&m.enc_hz[i])||0;
     document.getElementById('ea'+i).textContent=ok&&!Number.isNaN(deg)?deg.toFixed(1)+'°':'—';
@@ -383,6 +409,14 @@ function applyCfg(m){
   const ms=m.motor_sign||[1,1,1,1];
   motorSign=ms.map(v=>v<0?-1:1);
   ms0.checked=ms[0]<0; ms1.checked=ms[1]<0; ms2.checked=ms[2]<0; ms3.checked=ms[3]<0;
+  const ech=m.enc_ch||[0,1,2,3];
+  ech0.value=ech[0]; ech1.value=ech[1]; ech2.value=ech[2]; ech3.value=ech[3];
+  const es=m.enc_sign||[1,1,1,1];
+  es0.checked=es[0]<0; es1.checked=es[1]<0; es2.checked=es[2]<0; es3.checked=es[3]<0;
+  enc_odom.checked=m.enc_odom!==false;
+  enc_speed_fb.checked=m.enc_speed_fb!==false;
+  enc_blend.value=(m.enc_blend!=null)?m.enc_blend:0.85;
+  yaw_kalman.checked=m.yaw_kalman!==false;
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
   if(m.ap_url) apUrl.textContent=m.ap_url;
@@ -455,7 +489,11 @@ cfgForm.onsubmit=async (e)=>{
     wheel_radius_m:+wheel_radius_m.value, lx_m:+lx_m.value, ly_m:+ly_m.value, steps_per_rev:+steps_per_rev.value,
     max_step_hz:+max_step_hz.value, max_accel_hz:+max_accel_hz.value,
     invert_vx:invert_vx.checked, invert_vy:invert_vy.checked, invert_omega:invert_omega.checked,
-    motor_sign:[ms0.checked?-1:1, ms1.checked?-1:1, ms2.checked?-1:1, ms3.checked?-1:1]
+    motor_sign:[ms0.checked?-1:1, ms1.checked?-1:1, ms2.checked?-1:1, ms3.checked?-1:1],
+    enc_ch:[+ech0.value,+ech1.value,+ech2.value,+ech3.value],
+    enc_sign:[es0.checked?-1:1, es1.checked?-1:1, es2.checked?-1:1, es3.checked?-1:1],
+    enc_odom:enc_odom.checked, enc_speed_fb:enc_speed_fb.checked,
+    enc_blend:+enc_blend.value, yaw_kalman:yaw_kalman.checked
   };
   maxStepHz=body.max_step_hz||maxStepHz;
   await fetch('/api/cfg',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(body)});
