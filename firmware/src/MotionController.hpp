@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EncoderHub.hpp"
 #include "HolonomicKinematics.hpp"
 #include "Odometry.hpp"
 #include "RobotConfig.hpp"
@@ -22,10 +23,14 @@ public:
         }
     }
 
+    void attachEncoders(EncoderHub* enc) { enc_ = enc; }
+    EncoderHub* encoders() const { return enc_; }
+
     void setWebCommand(const Twist2D& ncmd, uint32_t now_ms) {
         if (estop_) {
             return;
         }
+        cancelMove();
         web_cmd_.twist = clampNorm(ncmd);
         web_cmd_.source = CmdSource::Web;
         web_cmd_.stamp_ms = now_ms;
@@ -42,6 +47,7 @@ public:
         if (estop_) {
             return;
         }
+        cancelMove();
         Twist2D n;
         n.vx = (cfg_.max_vx > 1e-6f) ? (si.vx / cfg_.max_vx) : 0.0f;
         n.vy = (cfg_.max_vy > 1e-6f) ? (si.vy / cfg_.max_vy) : 0.0f;
@@ -59,6 +65,44 @@ public:
     }
 
     /**
+     * Closed-loop body-frame translation using odometry (wheels + optional gyro yaw).
+     * dx/dy in meters in the pose at command time; omega held at 0.
+     */
+    bool startMoveBody(float dx_m, float dy_m, float speed_mps, uint32_t now_ms) {
+        if (estop_) {
+            return false;
+        }
+        const float dist = hypotf(dx_m, dy_m);
+        if (dist < 0.005f) {
+            return false;
+        }
+        const auto& p = odom_.state().pose;
+        const float c = cosf(p.theta);
+        const float s = sinf(p.theta);
+        move_tx_ = p.x + c * dx_m - s * dy_m;
+        move_ty_ = p.y + s * dx_m + c * dy_m;
+        float spd = fabsf(speed_mps);
+        if (spd < 0.05f) {
+            spd = 0.05f;
+        }
+        if (spd > cfg_.max_vx) {
+            spd = cfg_.max_vx;
+        }
+        move_speed_ = spd;
+        mode_ = Mode::MoveTo;
+        web_cmd_ = {};
+        zenoh_cmd_ = {};
+        raw_test_mode_ = false;
+        active_source_ = CmdSource::Web;
+        web_cmd_.stamp_ms = now_ms;
+        Serial.printf("[MOVE] body dx=%.3f dy=%.3f → (%.3f,%.3f) @ %.2f m/s\n", dx_m, dy_m,
+                      move_tx_, move_ty_, move_speed_);
+        return true;
+    }
+
+    bool moveActive() const { return mode_ == Mode::MoveTo; }
+
+    /**
      * Raw step-Hz per motor (Qt demo/pc_to_esp).
      * test_mode=true → idle motors freewheel (disable holding) so each axis
      * can be spun alone without fighting the other three locked steppers.
@@ -68,6 +112,7 @@ public:
         if (estop_) {
             return;
         }
+        cancelMove();
         raw_hz_[0] = m0;
         raw_hz_[1] = m1;
         raw_hz_[2] = m2;
@@ -85,6 +130,7 @@ public:
 
     void emergencyStop(uint32_t now_ms) {
         estop_ = true;
+        cancelMove();
         web_cmd_ = {};
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
@@ -102,6 +148,7 @@ public:
 
     void clearEstop() {
         estop_ = false;
+        cancelMove();
         web_cmd_ = {};
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
@@ -139,7 +186,14 @@ public:
             mode_ == Mode::RawMotors && (now_ms - raw_stamp_ms_) <= cfg_.cmd_timeout_ms;
 
         bool freewheel = false;
-        if (web_fresh && mode_ == Mode::RawMotors && raw_fresh) {
+        if (mode_ == Mode::MoveTo) {
+            if (!serviceMoveTo(cmd_hz)) {
+                mode_ = Mode::Idle;
+                active_source_ = CmdSource::None;
+            } else {
+                active_source_ = CmdSource::Web;
+            }
+        } else if (web_fresh && mode_ == Mode::RawMotors && raw_fresh) {
             for (int i = 0; i < 4; ++i) {
                 cmd_hz[i] = raw_hz_[i];
             }
@@ -161,18 +215,19 @@ public:
         applyWheelHz(cmd_hz, freewheel);
         copyHz(cmd_hz);
 
-        // Odometry from actual ramp speed (not setpoint)
+        // Prefer AS5600 wheel rates; fall back to FastAccelStepper ramp speed
         float measured[4] = {};
         readMeasuredLogicalHz(measured);
         odom_.update(measured, dt_s, gyro_z, gyro_valid, now_ms);
     }
 
 private:
-    enum class Mode : uint8_t { Idle, Cinematic, RawMotors };
+    enum class Mode : uint8_t { Idle, Cinematic, RawMotors, MoveTo };
 
     RobotConfig& cfg_;
     HolonomicKinematics& kin_;
     Odometry& odom_;
+    EncoderHub* enc_ = nullptr;
     Stepper* motors_[4] = {};
     VelocityCommand web_cmd_{};
     VelocityCommand zenoh_cmd_{};
@@ -184,6 +239,49 @@ private:
     float applied_hz_[4] = {};
     float raw_hz_[4] = {};
     uint32_t raw_stamp_ms_ = 0;
+    float move_tx_ = 0.0f;
+    float move_ty_ = 0.0f;
+    float move_speed_ = 0.2f;
+
+    void cancelMove() {
+        if (mode_ == Mode::MoveTo) {
+            mode_ = Mode::Idle;
+        }
+    }
+
+    /** @return false when goal reached / aborted (cmd_hz zeroed). */
+    bool serviceMoveTo(float cmd_hz[4]) {
+        const auto& p = odom_.state().pose;
+        const float ex = move_tx_ - p.x;
+        const float ey = move_ty_ - p.y;
+        const float dist = hypotf(ex, ey);
+        constexpr float kArriveM = 0.025f;
+        if (dist < kArriveM) {
+            for (int i = 0; i < 4; ++i) {
+                cmd_hz[i] = 0.0f;
+            }
+            Serial.println("[MOVE] arrived");
+            return false;
+        }
+
+        const float c = cosf(p.theta);
+        const float s = sinf(p.theta);
+        const float ebx = c * ex + s * ey;
+        const float eby = -s * ex + c * ey;
+
+        float speed = move_speed_;
+        constexpr float kSlowM = 0.15f;
+        if (dist < kSlowM) {
+            speed *= dist / kSlowM;
+        }
+
+        Twist2D n{};
+        n.vx = (cfg_.max_vx > 1e-6f) ? ((ebx / dist) * speed / cfg_.max_vx) : 0.0f;
+        n.vy = (cfg_.max_vy > 1e-6f) ? ((eby / dist) * speed / cfg_.max_vy) : 0.0f;
+        n.omega = 0.0f;
+        kin_.inverseNormalized(clampNorm(n), cmd_hz);
+        return true;
+    }
 
     void copyHz(const float hz[4]) {
         for (int i = 0; i < 4; ++i) {
@@ -191,9 +289,18 @@ private:
         }
     }
 
-    /** FAS current speed → logical IK frame (undo motor_sign). */
-    void readMeasuredLogicalHz(float out[4]) const {
+    /**
+     * Wheel rates for odometry: AS5600 when present, else FAS current speed.
+     * Output is logical IK frame (motor_sign undone for FAS).
+     */
+    void readMeasuredLogicalHz(float out[4]) {
+        float enc_hz[4] = {};
+        const bool have_enc = enc_ && enc_->okCount() > 0 && enc_->update(enc_hz);
         for (int i = 0; i < 4; ++i) {
+            if (have_enc && enc_->motorOk(i)) {
+                out[i] = enc_hz[i];
+                continue;
+            }
             float h = 0.0f;
             if (motors_[i] && motors_[i]->ok()) {
                 h = motors_[i]->getCurrentSpeedHz();

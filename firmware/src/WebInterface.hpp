@@ -35,6 +35,8 @@ public:
         http_.on("/api/estop", HTTP_GET, [this]() { handleEstop(); });
         http_.on("/api/clear_estop", HTTP_GET, [this]() { handleClearEstop(); });
         http_.on("/api/reset_odom", HTTP_GET, [this]() { handleResetOdom(); });
+        http_.on("/api/move", HTTP_GET, [this]() { handleMove(); });
+        http_.on("/api/move", HTTP_POST, [this]() { handleMove(); });
         http_.on("/api/cfg", HTTP_POST, [this]() { handleCfgPost(); });
 
         if (ota) {
@@ -188,6 +190,35 @@ private:
         sendOdom();
     }
 
+    void handleMove() {
+        float dx = 0.0f;
+        float dy = 0.0f;
+        float v = 0.2f;
+        if (http_.hasArg("plain")) {
+            JsonDocument doc;
+            if (!deserializeJson(doc, http_.arg("plain"))) {
+                dx = doc["dx"] | 0.0f;
+                dy = doc["dy"] | 0.0f;
+                v = doc["v"] | doc["speed"] | 0.2f;
+            }
+        } else {
+            dx = http_.hasArg("dx") ? http_.arg("dx").toFloat() : 0.0f;
+            dy = http_.hasArg("dy") ? http_.arg("dy").toFloat() : 0.0f;
+            if (http_.hasArg("v")) {
+                v = http_.arg("v").toFloat();
+            } else if (http_.hasArg("speed")) {
+                v = http_.arg("speed").toFloat();
+            }
+        }
+        if (!motion_.startMoveBody(dx, dy, v, millis())) {
+            cors();
+            http_.send(400, "application/json",
+                       "{\"ok\":false,\"err\":\"move rejected (estop or zero distance)\"}");
+            return;
+        }
+        sendOdom();
+    }
+
     void handleCfgPost() {
         JsonDocument doc;
         if (http_.hasArg("plain") && !deserializeJson(doc, http_.arg("plain"))) {
@@ -262,6 +293,9 @@ private:
             motion_.clearEstop();
         } else if (strcmp(t, "reset_odom") == 0) {
             odom_.reset();
+        } else if (strcmp(t, "move") == 0) {
+            motion_.startMoveBody(doc["dx"] | 0.0f, doc["dy"] | 0.0f,
+                                  doc["v"] | doc["speed"] | 0.2f, millis());
         } else if (strcmp(t, "save_cfg") == 0) {
             applyConfig(doc);
         }
@@ -393,6 +427,7 @@ private:
         doc["sta"] = wifi_.staConnected() ? wifi_.staIp().toString().c_str() : "down";
         doc["zenoh"] = zenoh_ready_ ? "ready" : "down";
         doc["estop"] = motion_.estop();
+        doc["moving"] = motion_.moveActive();
         doc["cmd_vx"] = last_cmd_vx_;
         doc["cmd_vy"] = last_cmd_vy_;
         doc["cmd_w"] = last_cmd_w_;
@@ -401,12 +436,16 @@ private:
         doc["driving"] = motion_.driving();
         JsonArray wheels = doc["wheels"].to<JsonArray>();
         JsonArray mok = doc["motor_ok"].to<JsonArray>();
+        JsonArray eok = doc["enc_ok"].to<JsonArray>();
         const float* applied = motion_.appliedHz();
+        EncoderHub* enc = motion_.encoders();
         for (int i = 0; i < 4; ++i) {
             // Prefer last commanded rates (immediate apply path)
             wheels.add(applied ? applied[i] : s.wheel_hz[i]);
             mok.add(motion_.motorOk(i));
+            eok.add(enc && enc->motorOk(i));
         }
+        doc["enc_n"] = enc ? enc->okCount() : 0;
         return doc;
     }
 

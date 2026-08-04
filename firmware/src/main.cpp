@@ -3,11 +3,13 @@
 #include <cmath>
 
 #include "AccelGyroReader.hpp"
+#include "EncoderHub.hpp"
 #include "FirmwareVersion.hpp"
 #include "HolonomicKinematics.hpp"
 #include "MotionController.hpp"
 #include "Odometry.hpp"
 #include "OtaService.hpp"
+#include "Pca9548a.hpp"
 #include "RobotConfig.hpp"
 #include "StatusLed.hpp"
 #include "WebInterface.hpp"
@@ -21,6 +23,9 @@
 // I2C
 #define I2C_SDA 21
 #define I2C_SCL 5
+// PCA9548A: AS5600 on ch0..3, BMI160 on ch4 (same 0x36 / 0x69 addresses)
+#define MUX_I2C_ADDR 0x70
+#define MUX_CH_IMU 4
 
 // Built-in LED on DOIT ESP32 DevKit
 #define STATUS_LED_PIN 2
@@ -44,6 +49,8 @@
 
 static RobotConfig g_cfg;
 static Stepper* g_motors[4] = {};
+static Pca9548a* g_mux = nullptr;
+static EncoderHub* g_enc = nullptr;
 static AccelGyroReader* g_imu = nullptr;
 static HolonomicKinematics* g_kin = nullptr;
 static Odometry* g_odom = nullptr;
@@ -160,14 +167,40 @@ void setup() {
     g_web->onConfigChanged(onConfigChanged, nullptr);
 
     Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.setClock(100000);  // mux + magnetic sensors prefer 100 kHz
+    Wire.setTimeOut(50);
+
     g_imu = new AccelGyroReader();
-    if (!g_imu->begin()) {
-        Serial.println("[Boot] IMU optional — continuing without gyro fusion");
+    g_mux = new Pca9548a(Wire, MUX_I2C_ADDR);
+    if (g_mux->begin()) {
+        g_imu->attachMux(g_mux, MUX_CH_IMU);
+        g_enc = new EncoderHub(*g_mux, g_cfg);
+        if (g_enc->begin()) {
+            g_motion->attachEncoders(g_enc);
+            Serial.printf("[Boot] Encoders: %d/4 AS5600 on PCA9548A\n", g_enc->okCount());
+        } else {
+            Serial.println("[Boot] Mux OK but no AS5600 — odom uses stepper speed");
+        }
+        if (!g_imu->begin()) {
+            Serial.println("[IMU] Not on mux ch4 — retry on main bus");
+            g_imu->attachMux(nullptr, 0);
+            if (!g_imu->begin()) {
+                Serial.println("[Boot] IMU optional — continuing without gyro fusion");
+            }
+        }
+    } else {
+        delete g_mux;
+        g_mux = nullptr;
+        Serial.println("[Boot] No PCA9548A — IMU/encoders on main bus if present");
+        if (!g_imu->begin()) {
+            Serial.println("[Boot] IMU optional — continuing without gyro fusion");
+        }
     }
 
     g_last_ctrl_ms = millis();
     Serial.println("[Boot] LED: slow=idle  fast=driving  double=ESTOP  flicker=OTA");
     Serial.println("[Boot] http://192.168.4.1/  OTA password=holodex");
+    Serial.println("[Boot] Move: GET /api/move?dx=0.3&dy=0&v=0.2");
 }
 
 void loop() {

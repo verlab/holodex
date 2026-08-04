@@ -10,7 +10,7 @@ class AccelGyroReader {
 public:
     AccelGyroReader();
 
-    /** Optional: IMU behind PCA9548A (e.g. channel 4). */
+    /** Optional: IMU behind PCA9548A (channel 4). Pass nullptr to use main bus. */
     void attachMux(Pca9548a* mux, uint8_t channel);
 
     bool begin();
