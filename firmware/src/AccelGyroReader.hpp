@@ -4,9 +4,14 @@
 #include <DFRobot_BMI160.h>
 #include <cmath>
 
+class Pca9548a;
+
 class AccelGyroReader {
 public:
     AccelGyroReader();
+
+    /** Optional: IMU behind PCA9548A (e.g. channel 4). */
+    void attachMux(Pca9548a* mux, uint8_t channel);
 
     bool begin();
     bool ready() const { return ready_; }
@@ -24,10 +29,13 @@ public:
     float gyroZ() const { return gyro_rps_[2]; }
 
 private:
+    bool selectBus();
     static float accelToMps2(int16_t val);
     static float gyroToRps(int16_t val);
 
     DFRobot_BMI160 bmi160_;
+    Pca9548a* mux_ = nullptr;
+    uint8_t mux_ch_ = 0;
     bool ready_ = false;
     float accel_mps2_[3] = {};
     float gyro_rps_[3] = {};
