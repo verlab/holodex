@@ -9,7 +9,14 @@ public:
     Stepper(int pulse_pin, int dir_pin, int enable_pin);
 
     bool ok() const { return p_stepper != nullptr; }
+    /** Last commanded signed step Hz (setpoint). */
     float getSpeedHz() const { return commanded_hz_; }
+
+    /**
+     * Actual ramp speed from FastAccelStepper (signed step/s).
+     * Use this for odometry — commanded Hz leads during acceleration.
+     */
+    float getCurrentSpeedHz() const;
 
     /**
      * Signed speed in step Hz.

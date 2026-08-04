@@ -55,9 +55,11 @@ static StatusLed g_led(STATUS_LED_PIN);
 static OtaService g_ota;
 
 static uint32_t g_last_ctrl_ms = 0;
-static uint32_t g_last_imu_ms = 0;
 static uint32_t g_last_zenoh_odom_ms = 0;
 static uint32_t g_last_zenoh_try_ms = 0;
+static float g_gyro_z = NAN;
+static bool g_gyro_valid = false;
+static uint32_t g_gyro_stamp_ms = 0;
 
 static void onOtaBusy(bool busy, void* /*ctx*/) {
     g_led.setMode(busy ? StatusLed::Mode::Ota : StatusLed::Mode::Idle);
@@ -200,22 +202,29 @@ void loop() {
         return;
     }
 
-    // Control / odom @ 50 Hz. Motors are also applied immediately on cmd receive.
+    // Control / odom @ 50 Hz. IMU read at the same rate (was 10 Hz with 20 ms dt).
     const uint32_t dt_ms = now - g_last_ctrl_ms;
     if (dt_ms >= 20) {
         const float dt_s = dt_ms * 0.001f;
         g_last_ctrl_ms = now;
 
-        float gyro_z = NAN;
-        // IMU rarely — I2C failures must not stall teleop
-        if (g_imu && g_imu->ready() && now - g_last_imu_ms >= 100) {
-            g_last_imu_ms = now;
+        if (g_imu && g_imu->ready()) {
             if (g_imu->read()) {
-                gyro_z = g_imu->gyroZ();
+                g_gyro_z = g_imu->gyroZ();  // rad/s
+                g_gyro_valid = true;
+                g_gyro_stamp_ms = now;
+            }
+        }
+        // Drop gyro if last good sample is too old (IMU unplugged mid-run)
+        if (g_gyro_valid && (now - g_gyro_stamp_ms) > 100) {
+            g_gyro_valid = false;
+            g_gyro_z = NAN;
+            if (g_odom) {
+                g_odom->clearGyro();
             }
         }
 
-        g_motion->update(dt_s, gyro_z, now);
+        g_motion->update(dt_s, g_gyro_z, g_gyro_valid, now);
     }
 
     if ((!g_zenoh || !g_zenoh->isReady()) && now - g_last_zenoh_try_ms > 8000) {

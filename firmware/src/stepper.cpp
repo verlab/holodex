@@ -26,6 +26,14 @@ Stepper::Stepper(int pulse_pin, int dir_pin, int enable_pin) {
     Serial.printf("[Stepper] OK pulse=%d dir=%d ena=%d\n", pulse_pin, dir_pin, enable_pin);
 }
 
+float Stepper::getCurrentSpeedHz() const {
+    if (!p_stepper) {
+        return 0.0f;
+    }
+    // milliHz → Hz (signed: direction of motion)
+    return static_cast<float>(p_stepper->getCurrentSpeedInMilliHz()) * 0.001f;
+}
+
 void Stepper::hardStop() {
     if (!p_stepper) {
         return;

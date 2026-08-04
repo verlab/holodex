@@ -120,12 +120,14 @@ public:
     }
     const float* appliedHz() const { return applied_hz_; }
 
-    void update(float dt_s, float gyro_z, uint32_t now_ms) {
-        float hz[4] = {};
+    void update(float dt_s, float gyro_z, bool gyro_valid, uint32_t now_ms) {
+        float cmd_hz[4] = {};
 
         if (estop_) {
             active_source_ = CmdSource::None;
-            odom_.update(hz, dt_s, gyro_z, now_ms);
+            float measured[4] = {};
+            readMeasuredLogicalHz(measured);
+            odom_.update(measured, dt_s, gyro_z, gyro_valid, now_ms);
             return;
         }
 
@@ -139,15 +141,15 @@ public:
         bool freewheel = false;
         if (web_fresh && mode_ == Mode::RawMotors && raw_fresh) {
             for (int i = 0; i < 4; ++i) {
-                hz[i] = raw_hz_[i];
+                cmd_hz[i] = raw_hz_[i];
             }
             active_source_ = CmdSource::Web;
             freewheel = raw_test_mode_;
         } else if (web_fresh && mode_ == Mode::Cinematic) {
-            kin_.inverseNormalized(web_cmd_.twist, hz);
+            kin_.inverseNormalized(web_cmd_.twist, cmd_hz);
             active_source_ = CmdSource::Web;
         } else if (zenoh_fresh) {
-            kin_.inverseNormalized(zenoh_cmd_.twist, hz);
+            kin_.inverseNormalized(zenoh_cmd_.twist, cmd_hz);
             active_source_ = CmdSource::Zenoh;
         } else {
             // Timeout → stop + re-hold (exit freewheel test)
@@ -156,9 +158,13 @@ public:
             raw_test_mode_ = false;
         }
 
-        applyWheelHz(hz, freewheel);
-        copyHz(hz);
-        odom_.update(hz, dt_s, gyro_z, now_ms);
+        applyWheelHz(cmd_hz, freewheel);
+        copyHz(cmd_hz);
+
+        // Odometry from actual ramp speed (not setpoint)
+        float measured[4] = {};
+        readMeasuredLogicalHz(measured);
+        odom_.update(measured, dt_s, gyro_z, gyro_valid, now_ms);
     }
 
 private:
@@ -182,6 +188,20 @@ private:
     void copyHz(const float hz[4]) {
         for (int i = 0; i < 4; ++i) {
             applied_hz_[i] = hz[i];
+        }
+    }
+
+    /** FAS current speed → logical IK frame (undo motor_sign). */
+    void readMeasuredLogicalHz(float out[4]) const {
+        for (int i = 0; i < 4; ++i) {
+            float h = 0.0f;
+            if (motors_[i] && motors_[i]->ok()) {
+                h = motors_[i]->getCurrentSpeedHz();
+                if (cfg_.motor_sign[i] < 0) {
+                    h = -h;
+                }
+            }
+            out[i] = h;
         }
     }
 

@@ -74,8 +74,9 @@ public:
         for (int i = 0; i < 4; ++i) {
             // Linear speed along drive direction (m/s)
             const float yi = cfg_.stepHzToMps(step_hz[i]);
-            // Same column order as inverseNormalized(vx, yaw, strafe):
+            // Match inverseNormalized(dir_x, yaw_n, strafe_n):
             //   v_i = ux*vx + uy*(R*ω) + lever*vy
+            // (chassis maps stick yaw → uy column, strafe → lever)
             const float lever = x_[i] * uy_[i] - y_[i] * ux_[i];
             const float R = 1.0f / inv_r_;
             const float row[3] = {ux_[i], lever, uy_[i] * R};  // vx, vy, omega
@@ -89,9 +90,9 @@ public:
         float x[3] = {};
         solve3x3(ata, atb, x);
         Twist2D si;
-        si.vx = x[0];
-        si.vy = x[1];
-        si.omega = x[2];
+        si.vx = x[0];     // m/s
+        si.vy = x[1];     // m/s
+        si.omega = x[2];  // rad/s (never degrees)
         return si;
     }
 
