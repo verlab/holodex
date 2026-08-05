@@ -12,7 +12,7 @@
  *   wheelbase  38 cm → lx = 0.19 m
  *   track      39 cm → ly = 0.195 m
  *   wheel radius 50 mm, 200-step motor @ 32 µsteps → 6400 steps/rev
- * Driver current limit (2 A) is set on the hardware (Vref), not in firmware.
+ * TB6600 current / µstep are set by DIP switches (≤4 A), not in firmware.
  */
 struct RobotConfig {
     // SoftAP (always on for local web teleop)
@@ -199,6 +199,17 @@ struct RobotConfig {
             prefs.putInt("ech3", 5);
             prefs.putInt("cfg_ver", 10);
             Serial.println("[CFG] migrated to v10: enc M←ch 0,1,4,5 (IMU ch6)");
+        }
+        if (prefs.getInt("cfg_ver", 0) < 11) {
+            // Body-twist speed FB + encoder logical frame (motor_sign). Keep FB on
+            // but reset enc_sign to +1 so magnet polarity is independent of DIR flip.
+            enc_sign[0] = enc_sign[1] = enc_sign[2] = enc_sign[3] = 1;
+            prefs.putInt("es0", 1);
+            prefs.putInt("es1", 1);
+            prefs.putInt("es2", 1);
+            prefs.putInt("es3", 1);
+            prefs.putInt("cfg_ver", 11);
+            Serial.println("[CFG] migrated to v11: enc logical frame via motor_sign");
         }
         prefs.end();
         return true;

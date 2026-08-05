@@ -6,7 +6,8 @@ VerLab **mecanum** robot: 4× NEMA23 steppers, AS5600 encoders (PCA9548A), BMI16
 
 | Area | Description |
 |------|-------------|
-| **Actuation** | NEMA23 steppers + drivers (2 A via Vref) |
+| **Actuation** | NEMA23 + TB6600 (≤4 A, DC 9–42 V) |
+| **Power** | 6S LiPo 22.2 V / 22000 mAh; Mini 3 A buck → 5 V logic |
 | **Mechanics** | 4WD mecanum wheels — spin about chassis center |
 | **Onboard control** | Mecanum IK/FK, SoftAP web teleop, optional enc speed PI |
 | **Sensing** | 4× AS5600 + BMI160 on PCA9548A |

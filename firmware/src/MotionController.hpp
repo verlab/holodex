@@ -162,8 +162,8 @@ public:
             }
             last_hz_[i] = 0.0f;
             applied_hz_[i] = 0.0f;
-            speed_i_[i] = 0.0f;
         }
+        resetSpeedIntegrators();
         active_source_ = CmdSource::None;
         Serial.println("[ESTOP] latched");
     }
@@ -174,9 +174,7 @@ public:
         web_cmd_ = {};
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
-        for (int i = 0; i < 4; ++i) {
-            speed_i_[i] = 0.0f;
-        }
+        resetSpeedIntegrators();
         Serial.println("[ESTOP] cleared");
     }
 
@@ -236,19 +234,15 @@ public:
             active_source_ = CmdSource::None;
             mode_ = Mode::Idle;
             raw_test_mode_ = false;
-            for (int i = 0; i < 4; ++i) {
-                speed_i_[i] = 0.0f;
-            }
+            resetSpeedIntegrators();
         }
 
-        // Closed-loop speed assist: correct command toward encoder-measured rate
+        // Body-level speed assist (preserves mecanum coupling / ICR at center)
         if (!freewheel && cfg_.enc_speed_fb && enc_ && enc_->fresh() &&
             active_source_ != CmdSource::None) {
             applySpeedFeedback(cmd_hz, dt_s);
         } else if (active_source_ == CmdSource::None) {
-            for (int i = 0; i < 4; ++i) {
-                speed_i_[i] = 0.0f;
-            }
+            resetSpeedIntegrators();
         }
 
         applyWheelHz(cmd_hz, freewheel);
@@ -280,7 +274,10 @@ private:
     float move_tx_ = 0.0f;
     float move_ty_ = 0.0f;
     float move_speed_ = 0.2f;
-    float speed_i_[4] = {};
+    // Body-twist integrators for speed assist (not per-wheel — preserves ICR)
+    float speed_i_vx_ = 0.0f;
+    float speed_i_vy_ = 0.0f;
+    float speed_i_w_ = 0.0f;
     const char* measure_src_ = "fas";
 
     void cancelMove() {
@@ -289,23 +286,70 @@ private:
         }
     }
 
-    /** PI on logical Hz: cmd += Kp*(cmd - enc) + Ki*∫ — helps slip / load. */
+    void resetSpeedIntegrators() {
+        speed_i_vx_ = 0.0f;
+        speed_i_vy_ = 0.0f;
+        speed_i_w_ = 0.0f;
+    }
+
+    /**
+     * Body-level PI speed assist: compare commanded vs encoder twist, correct in
+     * SE(2), then re-IK. Per-wheel PI was wrong — it broke mecanum coupling and
+     * could zero one wheel while others spun (ICR at a corner).
+     */
     void applySpeedFeedback(float cmd_hz[4], float dt_s) {
-        constexpr float kP = 0.25f;
-        constexpr float kI = 0.8f;
-        const float i_lim = 0.25f * static_cast<float>(cfg_.max_step_hz);
         for (int i = 0; i < 4; ++i) {
             if (!enc_->motorOk(i)) {
-                speed_i_[i] *= 0.9f;
-                continue;
+                resetSpeedIntegrators();
+                return;
             }
-            const float meas = enc_->lastHz(i);
-            const float err = cmd_hz[i] - meas;
-            speed_i_[i] = clampf(speed_i_[i] + err * dt_s, -i_lim, i_lim);
-            float out = cmd_hz[i] + kP * err + kI * speed_i_[i];
-            const float lim = static_cast<float>(cfg_.max_step_hz);
-            cmd_hz[i] = clampf(out, -lim, lim);
         }
+
+        float meas_hz[4] = {};
+        for (int i = 0; i < 4; ++i) {
+            meas_hz[i] = enc_->lastHz(i);
+        }
+
+        const Twist2D cmd_tw = kin_.forwardSi(cmd_hz);
+        const Twist2D meas_tw = kin_.forwardSi(meas_hz);
+
+        const float cmd_mag =
+            fabsf(cmd_tw.vx) + fabsf(cmd_tw.vy) + fabsf(cmd_tw.omega) * kin_.leverArm();
+        if (cmd_mag < 0.02f) {
+            resetSpeedIntegrators();
+            return;
+        }
+
+        constexpr float kP = 0.35f;
+        constexpr float kI = 0.6f;
+        const float i_lim_v = 0.15f * cfg_.max_vx;
+        const float i_lim_w = 0.15f * cfg_.max_omega;
+
+        const float evx = cmd_tw.vx - meas_tw.vx;
+        const float evy = cmd_tw.vy - meas_tw.vy;
+        const float ew = cmd_tw.omega - meas_tw.omega;
+
+        speed_i_vx_ = clampf(speed_i_vx_ + evx * dt_s, -i_lim_v, i_lim_v);
+        speed_i_vy_ = clampf(speed_i_vy_ + evy * dt_s, -i_lim_v, i_lim_v);
+        speed_i_w_ = clampf(speed_i_w_ + ew * dt_s, -i_lim_w, i_lim_w);
+
+        Twist2D out;
+        out.vx = cmd_tw.vx + kP * evx + kI * speed_i_vx_;
+        out.vy = cmd_tw.vy + kP * evy + kI * speed_i_vy_;
+        out.omega = cmd_tw.omega + kP * ew + kI * speed_i_w_;
+
+        // Cap assist so we never more than ~40% above the original command
+        const float out_mag =
+            fabsf(out.vx) + fabsf(out.vy) + fabsf(out.omega) * kin_.leverArm();
+        if (out_mag > 1.4f * cmd_mag && out_mag > 1e-6f) {
+            const float s = (1.4f * cmd_mag) / out_mag;
+            out.vx *= s;
+            out.vy *= s;
+            out.omega *= s;
+        }
+
+        // wheelsFromBody: cmd_hz already embeds invert_*; do not invert again
+        kin_.wheelsFromBody(out, cmd_hz);
     }
 
     /** @return false when goal reached / aborted (cmd_hz zeroed). */

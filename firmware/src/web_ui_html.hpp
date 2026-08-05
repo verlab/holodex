@@ -58,6 +58,14 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),#5adf8a)}
 .motor-row{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
 .motor-row .val{min-width:64px}
+.seg{display:flex;gap:4px;flex-wrap:wrap;margin:8px 0 10px}
+.seg button{flex:1;min-width:88px;padding:8px 6px;font-size:.72rem;letter-spacing:.03em;text-transform:uppercase}
+.seg button.active{border-color:var(--accent);color:var(--accent);background:#1a2e3a}
+.odom-table{width:100%;border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:8px}
+.odom-table th,.odom-table td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:right}
+.odom-table th:first-child,.odom-table td:first-child{text-align:left;color:var(--muted)}
+.odom-table th{color:var(--muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.04em}
+.odom-table tr.sel td{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -89,8 +97,8 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
     </div>
     <div class="row">
       <label>Max speed</label>
-      <input id="maxSpeed" type="range" min="5" max="100" step="1" value="35"/>
-      <span class="val" id="maxSpeedVal">35%</span>
+      <input id="maxSpeed" type="range" min="5" max="100" step="1" value="70"/>
+      <span class="val" id="maxSpeedVal">70%</span>
     </div>
     <div class="btns">
       <button class="danger" id="estop">E-STOP</button>
@@ -102,6 +110,12 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
   </section>
   <section class="card">
     <h2>Odometry</h2>
+    <div class="seg" id="odomViewSeg">
+      <button type="button" data-view="wheels">Pure · steppers</button>
+      <button type="button" data-view="enc">+ Encoders</button>
+      <button type="button" data-view="full" class="active">+ IMU</button>
+    </div>
+    <p class="hint" id="odomViewHint">Full: wheels+enc rates, yaw from IMU (+ Kalman). Compare all three below.</p>
     <div class="metrics">
       <div class="metric"><small>x (m)</small><b id="ox">0.000</b></div>
       <div class="metric"><small>y (m)</small><b id="oy">0.000</b></div>
@@ -110,10 +124,19 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="metric"><small>vy</small><b id="ovy">0.00</b></div>
       <div class="metric"><small>ω</small><b id="ow">0.00</b></div>
     </div>
+    <table class="odom-table" id="odomCompare">
+      <thead>
+        <tr><th>Stream</th><th>x</th><th>y</th><th>θ°</th><th>ω</th></tr>
+      </thead>
+      <tbody>
+        <tr data-view="wheels"><td>Pure (steppers)</td><td id="cx_w">—</td><td id="cy_w">—</td><td id="cth_w">—</td><td id="cw_w">—</td></tr>
+        <tr data-view="enc"><td>+ Encoders</td><td id="cx_e">—</td><td id="cy_e">—</td><td id="cth_e">—</td><td id="cw_e">—</td></tr>
+        <tr data-view="full" class="sel"><td>+ IMU</td><td id="cx_f">—</td><td id="cy_f">—</td><td id="cth_f">—</td><td id="cw_f">—</td></tr>
+      </tbody>
+    </table>
     <div class="row" style="margin-top:12px"><label>Src</label><b id="src">none</b></div>
     <div class="row"><label>Odom</label><span id="odomFusion">-</span></div>
     <div class="row"><label>Wheels</label><span id="wheelSrc">-</span></div>
-    <div class="row"><label>θ w / w+e / full</label><span id="thetaCompare">-</span></div>
     <div class="row"><label>Cmd</label><span id="cmdDbg">-</span></div>
     <div class="row"><label>STA</label><span id="sta">-</span></div>
     <div class="row"><label>Zenoh</label><span id="zenoh">-</span></div>
@@ -175,7 +198,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>steps/rev</label><input id="steps_per_rev" type="number" step="1"/></div>
       <div class="row"><label>Max step Hz</label><input id="max_step_hz" type="number" step="100"/></div>
       <div class="row"><label>Max accel</label><input id="max_accel_hz" type="number" step="100"/></div>
-      <p class="hint">Firmware ceiling for Max speed slider (100%). Quieter: ~8000–12000 Hz, accel ~4000–8000.</p>
+      <p class="hint">Firmware ceiling at Max speed 100%. Effective Hz = slider% × this value (e.g. 35% of 12000 = 4200 Hz).</p>
       <div class="row"><label>Inv fwd</label><input id="invert_vx" type="checkbox"/></div>
       <div class="row"><label>Inv strafe</label><input id="invert_vy" type="checkbox"/></div>
       <div class="row"><label>Inv yaw</label><input id="invert_omega" type="checkbox"/></div>
@@ -206,7 +229,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>Speed FB</label><input id="enc_speed_fb" type="checkbox"/></div>
       <div class="row"><label>Enc blend</label><input id="enc_blend" type="number" min="0" max="1" step="0.05"/></div>
       <div class="row"><label>Yaw Kalman</label><input id="yaw_kalman" type="checkbox"/></div>
-      <p class="hint">Enc odom: AS5600 rates for pose (blend with stepper). Speed FB: PI corrects motor cmd vs encoder. Yaw Kalman: gyro + wheel ω → heading/bias.</p>
+      <p class="hint">Enc odom: AS5600 rates (logical IK frame) blended with stepper. Speed FB: body-twist PI then re-IK (keeps spin about center). Yaw Kalman: gyro + wheel ω.</p>
       <div class="btns"><button class="ok" type="submit">Save &amp; apply</button></div>
     </form>
 
@@ -224,12 +247,28 @@ let activePane='drive', estopLocal=false, maxStepHz=12000, lastSentActive=false,
 let mx=0, my=0, yaw=0;
 let lxM=0.19, lyM=0.195;
 let motorSign=[1,1,1,1];
+let odomView='full';
+let lastOdomMsg=null;
 const badge=document.getElementById('wsBadge');
 const wheels=document.getElementById('wheels');
 const encoders=document.getElementById('encoders');
 const motorPct=[0,0,0,0];
 const maxSpeedEl=document.getElementById('maxSpeed');
 const maxSpeedVal=document.getElementById('maxSpeedVal');
+const odomHints={
+  wheels:'Pure: stepper command rates only, yaw from wheel FK (no encoders, no IMU).',
+  enc:'+ Encoders: AS5600 rates blended with steppers, yaw from wheel FK (no IMU).',
+  full:'+ IMU: wheels+enc rates, yaw from gyro (+ Kalman bias). Primary / Zenoh odom.'
+};
+document.querySelectorAll('#odomViewSeg button').forEach(btn=>{
+  btn.onclick=()=>{
+    odomView=btn.dataset.view;
+    document.querySelectorAll('#odomViewSeg button').forEach(b=>b.classList.toggle('active', b===btn));
+    document.querySelectorAll('#odomCompare tr[data-view]').forEach(tr=>tr.classList.toggle('sel', tr.dataset.view===odomView));
+    odomViewHint.textContent=odomHints[odomView]||'';
+    if(lastOdomMsg) applyOdom(lastOdomMsg);
+  };
+});
 
 function bindPad(pad, knob, onChange, axisMode){
   // axisMode: 'xy' | 'x' (yaw uses horizontal only)
@@ -271,7 +310,11 @@ let moveActive=false, turnActive=false;
 const movePad=bindPad(joyMove, knobMove, (x,y,active)=>{ mx=x; my=y; moveActive=active; if(!active) pushCmd(true); }, 'xy');
 const turnPad=bindPad(joyTurn, knobTurn, (x,y,active)=>{ yaw=x; turnActive=active; if(!active) pushCmd(true); }, 'x');
 
-maxSpeedEl.oninput=()=>{ maxSpeedVal.textContent=maxSpeedEl.value+'%'; };
+maxSpeedEl.oninput=()=>{
+  const pct=+maxSpeedEl.value;
+  maxSpeedVal.textContent=pct+'% ('+Math.round(pct/100*maxStepHz)+' Hz)';
+};
+maxSpeedEl.oninput();
 
 const motorCorner=['FL','RL','FR','RR'];
 for(let i=0;i<4;i++){
@@ -337,21 +380,50 @@ function motorsYawSpin(speedFrac, sense){
   return mecanumMix(0, 0, sense).map(v=>Math.round(v*speedFrac*maxStepHz));
 }
 
+function pickOdom(m, view){
+  if(view==='wheels'){
+    return {
+      x:m.x_wheels!=null?m.x_wheels:m.x_step,
+      y:m.y_wheels!=null?m.y_wheels:m.y_step,
+      th:m.theta_wheels!=null?m.theta_wheels:m.theta_step,
+      vx:m.vx_wheels, vy:m.vy_wheels, w:m.omega_wheels,
+      fusion:m.odom_wheels_fusion||'wheels'
+    };
+  }
+  if(view==='enc'){
+    return {
+      x:m.x_wheels_enc!=null?m.x_wheels_enc:m.x_enc,
+      y:m.y_wheels_enc!=null?m.y_wheels_enc:m.y_enc,
+      th:m.theta_wheels_enc!=null?m.theta_wheels_enc:m.theta_enc,
+      vx:m.vx_wheels_enc, vy:m.vy_wheels_enc, w:m.omega_wheels_enc,
+      fusion:m.odom_wheels_enc_fusion||'wheels+enc'
+    };
+  }
+  return {
+    x:m.x_full!=null?m.x_full:m.x,
+    y:m.y_full!=null?m.y_full:m.y,
+    th:m.theta_full!=null?m.theta_full:m.theta,
+    vx:m.vx_full!=null?m.vx_full:m.vx,
+    vy:m.vy_full!=null?m.vy_full:m.vy,
+    w:m.omega_full!=null?m.omega_full:m.omega,
+    fusion:m.odom_fusion||'wheels+enc+imu'
+  };
+}
+function fmtN(v,d){ return (v==null||Number.isNaN(Number(v)))?'—':Number(v).toFixed(d); }
 function applyOdom(m){
-  ox.textContent=Number(m.x||0).toFixed(3); oy.textContent=Number(m.y||0).toFixed(3);
-  oth.textContent=(Number(m.theta||0)*180/Math.PI).toFixed(1);
-  ovx.textContent=Number(m.vx||0).toFixed(2); ovy.textContent=Number(m.vy||0).toFixed(2); ow.textContent=Number(m.omega||0).toFixed(2);
-  src.textContent=m.estop?'ESTOP':(m.driving?'DRIVE':(m.source||'none'));
-  odomFusion.textContent=(m.odom_fusion||'-')+(m.gyro_bias!=null?' · bias '+Number(m.gyro_bias).toFixed(4):'');
-  wheelSrc.textContent=m.wheel_src||'-';
+  lastOdomMsg=m;
   const r2d=180/Math.PI;
-  const tw=m.theta_wheels!=null?m.theta_wheels:m.theta_step;
-  const twe=m.theta_wheels_enc!=null?m.theta_wheels_enc:m.theta_enc;
-  const tf=m.theta;
-  thetaCompare.textContent=
-    (tw!=null?(Number(tw)*r2d).toFixed(1)+'°':'—')+' / '+
-    (twe!=null?(Number(twe)*r2d).toFixed(1)+'°':'—')+' / '+
-    (tf!=null?(Number(tf)*r2d).toFixed(1)+'°':'—');
+  const sel=pickOdom(m, odomView);
+  ox.textContent=fmtN(sel.x,3); oy.textContent=fmtN(sel.y,3);
+  oth.textContent=fmtN(sel.th!=null?sel.th*r2d:null,1);
+  ovx.textContent=fmtN(sel.vx,2); ovy.textContent=fmtN(sel.vy,2); ow.textContent=fmtN(sel.w,2);
+  const w=pickOdom(m,'wheels'), e=pickOdom(m,'enc'), f=pickOdom(m,'full');
+  cx_w.textContent=fmtN(w.x,3); cy_w.textContent=fmtN(w.y,3); cth_w.textContent=fmtN(w.th!=null?w.th*r2d:null,1); cw_w.textContent=fmtN(w.w,2);
+  cx_e.textContent=fmtN(e.x,3); cy_e.textContent=fmtN(e.y,3); cth_e.textContent=fmtN(e.th!=null?e.th*r2d:null,1); cw_e.textContent=fmtN(e.w,2);
+  cx_f.textContent=fmtN(f.x,3); cy_f.textContent=fmtN(f.y,3); cth_f.textContent=fmtN(f.th!=null?f.th*r2d:null,1); cw_f.textContent=fmtN(f.w,2);
+  src.textContent=m.estop?'ESTOP':(m.driving?'DRIVE':(m.source||'none'));
+  odomFusion.textContent=(sel.fusion||'-')+(m.gyro_bias!=null && odomView==='full'?' · bias '+Number(m.gyro_bias).toFixed(4):'');
+  wheelSrc.textContent=m.wheel_src||'-';
   sta.textContent=m.sta||'-'; zenoh.textContent=m.zenoh||'-';
   if(m.version) fwVer.textContent='fw '+m.version+(m.build?' ('+m.build+')':'');
   if(m.estop){ estopHint.textContent='E-STOP LATCHED — Clear E-Stop (LED double-blink)'; estopHint.style.color='var(--danger)'; }

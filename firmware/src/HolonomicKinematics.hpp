@@ -34,19 +34,11 @@ public:
 
     float leverArm() const { return L_; }
 
-    /** Body twist (SI) → wheel step Hz. */
-    void inverseSi(const Twist2D& si_in, float step_hz_out[4]) const {
-        Twist2D si = si_in;
-        if (cfg_.invert_vx) {
-            si.vx = -si.vx;
-        }
-        if (cfg_.invert_vy) {
-            si.vy = -si.vy;
-        }
-        if (cfg_.invert_omega) {
-            si.omega = -si.omega;
-        }
-
+    /**
+     * Body twist (SI) → wheel step Hz (no axis invert flags).
+     * Used by speed assist after forwardSi so invert is not applied twice.
+     */
+    void wheelsFromBody(const Twist2D& si, float step_hz_out[4]) const {
         const float Lw = L_ * si.omega;
         const float v[4] = {
             si.vx - si.vy - Lw,  // M0 FL
@@ -58,6 +50,21 @@ public:
             step_hz_out[i] = cfg_.mpsToStepHz(v[i]);
         }
         saturatePeak(step_hz_out);
+    }
+
+    /** Body twist (SI) → wheel step Hz (applies invert_* then IK). */
+    void inverseSi(const Twist2D& si_in, float step_hz_out[4]) const {
+        Twist2D si = si_in;
+        if (cfg_.invert_vx) {
+            si.vx = -si.vx;
+        }
+        if (cfg_.invert_vy) {
+            si.vy = -si.vy;
+        }
+        if (cfg_.invert_omega) {
+            si.omega = -si.omega;
+        }
+        wheelsFromBody(si, step_hz_out);
     }
 
     /**

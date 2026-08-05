@@ -466,21 +466,34 @@ private:
         doc["version"] = HOLODEX_FW_VERSION;
         doc["build"] = HOLODEX_FW_BUILD;
         doc["max_step_hz"] = cfg_.max_step_hz;
+        // Primary (full) — also mirrored under *_full for UI clarity
         doc["x"] = s.pose.x;
         doc["y"] = s.pose.y;
         doc["theta"] = s.pose.theta;
         doc["vx"] = s.twist.vx;
         doc["vy"] = s.twist.vy;
         doc["omega"] = s.twist.omega;
+        doc["x_full"] = s.pose.x;
+        doc["y_full"] = s.pose.y;
+        doc["theta_full"] = s.pose.theta;
+        doc["vx_full"] = s.twist.vx;
+        doc["vy_full"] = s.twist.vy;
+        doc["omega_full"] = s.twist.omega;
         {
             const auto& w = motion_.odomWheels().state();
             doc["x_wheels"] = w.pose.x;
             doc["y_wheels"] = w.pose.y;
             doc["theta_wheels"] = w.pose.theta;
+            doc["vx_wheels"] = w.twist.vx;
+            doc["vy_wheels"] = w.twist.vy;
+            doc["omega_wheels"] = w.twist.omega;
             const auto& we = motion_.odomWheelsEnc().state();
             doc["x_wheels_enc"] = we.pose.x;
             doc["y_wheels_enc"] = we.pose.y;
             doc["theta_wheels_enc"] = we.pose.theta;
+            doc["vx_wheels_enc"] = we.twist.vx;
+            doc["vy_wheels_enc"] = we.twist.vy;
+            doc["omega_wheels_enc"] = we.twist.omega;
             // legacy keys
             doc["x_step"] = w.pose.x;
             doc["y_step"] = w.pose.y;
@@ -489,6 +502,8 @@ private:
             doc["y_enc"] = we.pose.y;
             doc["theta_enc"] = we.pose.theta;
         }
+        doc["odom_wheels_fusion"] = motion_.odomWheels().fusionMode();
+        doc["odom_wheels_enc_fusion"] = motion_.odomWheelsEnc().fusionMode();
         doc["source"] = sourceName(motion_.activeSource());
         doc["sta"] = wifi_.staConnected() ? wifi_.staIp().toString().c_str() : "down";
         doc["zenoh"] = zenoh_ready_ ? "ready" : "down";

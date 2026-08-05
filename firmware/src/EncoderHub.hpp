@@ -9,6 +9,8 @@
  * Up to 4× AS5600 on PCA9548A (any of channels 0..7).
  *
  * Config maps mux channel → motor (enc_ch[Mi]) and shaft polarity (enc_sign).
+ * Rates are published in the logical IK frame (same as MotionController cmds):
+ * enc_sign (magnet/mount) then motor_sign (DIR mirror), matching FAS undo.
  * Call sample() once per control tick; odometry/UI read motor-indexed cache.
  *
  * HoloDex wiring: AS5600 on mux ch0,1,4,5 → M0..M3; BMI160 on ch6 (do not probe).
@@ -205,7 +207,11 @@ private:
             angle_rad_[m] = ch_angle_[ch];
             if (rates) {
                 float hz = ch_hz[ch];
+                // Magnet/mount polarity, then DIR mirror → logical IK frame
                 if (cfg_.enc_sign[m] < 0) {
+                    hz = -hz;
+                }
+                if (cfg_.motor_sign[m] < 0) {
                     hz = -hz;
                 }
                 enc_hz_[m] = hz;
