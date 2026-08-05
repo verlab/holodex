@@ -197,7 +197,7 @@ private:
     }
 
     void handleResetOdom() {
-        odom_.reset();
+        motion_.resetAllOdom();
         sendOdom();
     }
 
@@ -303,7 +303,7 @@ private:
         } else if (strcmp(t, "clear_estop") == 0) {
             motion_.clearEstop();
         } else if (strcmp(t, "reset_odom") == 0) {
-            odom_.reset();
+            motion_.resetAllOdom();
         } else if (strcmp(t, "move") == 0) {
             motion_.startMoveBody(doc["dx"] | 0.0f, doc["dy"] | 0.0f,
                                   doc["v"] | doc["speed"] | 0.2f, millis());
@@ -472,6 +472,16 @@ private:
         doc["vx"] = s.twist.vx;
         doc["vy"] = s.twist.vy;
         doc["omega"] = s.twist.omega;
+        {
+            const auto& st = motion_.odomStepper().state();
+            doc["x_step"] = st.pose.x;
+            doc["y_step"] = st.pose.y;
+            doc["theta_step"] = st.pose.theta;
+            const auto& en = motion_.odomEncoder().state();
+            doc["x_enc"] = en.pose.x;
+            doc["y_enc"] = en.pose.y;
+            doc["theta_enc"] = en.pose.theta;
+        }
         doc["source"] = sourceName(motion_.activeSource());
         doc["sta"] = wifi_.staConnected() ? wifi_.staIp().toString().c_str() : "down";
         doc["zenoh"] = zenoh_ready_ ? "ready" : "down";

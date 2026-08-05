@@ -16,8 +16,12 @@
 class MotionController {
 public:
     MotionController(RobotConfig& cfg, Stepper* motors[4], HolonomicKinematics& kin,
-                     Odometry& odom)
-        : cfg_(cfg), kin_(kin), odom_(odom) {
+                     Odometry& odom_fused, Odometry& odom_stepper, Odometry& odom_encoder)
+        : cfg_(cfg),
+          kin_(kin),
+          odom_(odom_fused),
+          odom_step_(odom_stepper),
+          odom_enc_(odom_encoder) {
         for (int i = 0; i < 4; ++i) {
             motors_[i] = motors[i];
         }
@@ -25,6 +29,16 @@ public:
 
     void attachEncoders(EncoderHub* enc) { enc_ = enc; }
     EncoderHub* encoders() const { return enc_; }
+
+    Odometry& odomFused() { return odom_; }
+    Odometry& odomStepper() { return odom_step_; }
+    Odometry& odomEncoder() { return odom_enc_; }
+
+    void resetAllOdom() {
+        odom_.reset();
+        odom_step_.reset();
+        odom_enc_.reset();
+    }
 
     void setWebCommand(const Twist2D& ncmd, uint32_t now_ms) {
         if (estop_) {
@@ -181,9 +195,7 @@ public:
 
         if (estop_) {
             active_source_ = CmdSource::None;
-            float measured[4] = {};
-            readMeasuredLogicalHz(measured);
-            odom_.update(measured, dt_s, gyro_z, gyro_valid, now_ms);
+            updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
             return;
         }
 
@@ -236,10 +248,7 @@ public:
 
         applyWheelHz(cmd_hz, freewheel);
         copyHz(cmd_hz);
-
-        float measured[4] = {};
-        readMeasuredLogicalHz(measured);
-        odom_.update(measured, dt_s, gyro_z, gyro_valid, now_ms);
+        updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
     }
 
 private:
@@ -247,7 +256,9 @@ private:
 
     RobotConfig& cfg_;
     HolonomicKinematics& kin_;
-    Odometry& odom_;
+    Odometry& odom_;       // fused (encoder blend + optional yaw KF) — primary
+    Odometry& odom_step_;  // FastAccelStepper rates only (dead-reckoning baseline)
+    Odometry& odom_enc_;   // AS5600 rates only (zeros if sensor missing)
     EncoderHub* enc_ = nullptr;
     Stepper* motors_[4] = {};
     VelocityCommand web_cmd_{};
@@ -332,31 +343,45 @@ private:
         }
     }
 
-    /**
-     * Wheel rates for odometry in logical IK frame.
-     * Blends AS5600 (mapped motor←mux ch) with FastAccelStepper ramp speed.
-     */
-    void readMeasuredLogicalHz(float out[4]) {
-        int n_enc = 0;
-        int n_fas = 0;
-        const bool enc_fresh = enc_ && enc_->fresh();
-        const float a = cfg_.enc_blend;
+    void readFasLogicalHz(float out[4]) const {
         for (int i = 0; i < 4; ++i) {
-            float fas = 0.0f;
+            float h = 0.0f;
             if (motors_[i] && motors_[i]->ok()) {
-                fas = motors_[i]->getCurrentSpeedHz();
+                h = motors_[i]->getCurrentSpeedHz();
                 if (cfg_.motor_sign[i] < 0) {
-                    fas = -fas;
+                    h = -h;
                 }
             }
-            const bool have_enc = enc_fresh && enc_->motorOk(i) && cfg_.enc_odom;
-            if (have_enc) {
-                const float e = enc_->lastHz(i);
-                out[i] = a * e + (1.0f - a) * fas;
+            out[i] = h;
+        }
+    }
+
+    void readEncLogicalHz(float out[4]) const {
+        const bool enc_fresh = enc_ && enc_->fresh();
+        for (int i = 0; i < 4; ++i) {
+            if (enc_fresh && enc_->motorOk(i)) {
+                out[i] = enc_->lastHz(i);
+            } else {
+                out[i] = 0.0f;
+            }
+        }
+    }
+
+    void updateOdometryStreams(float dt_s, float gyro_z, bool gyro_valid, uint32_t now_ms) {
+        float fas[4] = {};
+        float enc[4] = {};
+        float blend[4] = {};
+        readFasLogicalHz(fas);
+        readEncLogicalHz(enc);
+
+        int n_enc = 0;
+        const float a = cfg_.enc_blend;
+        for (int i = 0; i < 4; ++i) {
+            if (cfg_.enc_odom && enc_ && enc_->fresh() && enc_->motorOk(i)) {
+                blend[i] = a * enc[i] + (1.0f - a) * fas[i];
                 n_enc++;
             } else {
-                out[i] = fas;
-                n_fas++;
+                blend[i] = fas[i];
             }
         }
         if (n_enc == 4) {
@@ -366,7 +391,10 @@ private:
         } else {
             measure_src_ = "fas";
         }
-        (void)n_fas;
+
+        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms);
+        odom_enc_.update(enc, dt_s, gyro_z, gyro_valid, now_ms);
+        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms);
     }
 
     static float clampf(float v, float lo, float hi) {

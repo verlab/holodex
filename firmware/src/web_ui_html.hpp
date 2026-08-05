@@ -113,6 +113,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
     <div class="row" style="margin-top:12px"><label>Src</label><b id="src">none</b></div>
     <div class="row"><label>Odom</label><span id="odomFusion">-</span></div>
     <div class="row"><label>Wheels</label><span id="wheelSrc">-</span></div>
+    <div class="row"><label>θ step/enc</label><span id="thetaCompare">-</span></div>
     <div class="row"><label>Cmd</label><span id="cmdDbg">-</span></div>
     <div class="row"><label>STA</label><span id="sta">-</span></div>
     <div class="row"><label>Zenoh</label><span id="zenoh">-</span></div>
@@ -342,6 +343,10 @@ function applyOdom(m){
   src.textContent=m.estop?'ESTOP':(m.driving?'DRIVE':(m.source||'none'));
   odomFusion.textContent=(m.odom_fusion||'-')+(m.gyro_bias!=null?' · bias '+Number(m.gyro_bias).toFixed(4):'');
   wheelSrc.textContent=m.wheel_src||'-';
+  const r2d=180/Math.PI;
+  thetaCompare.textContent=
+    (m.theta_step!=null? (Number(m.theta_step)*r2d).toFixed(1)+'°':'—')+' / '+
+    (m.theta_enc!=null? (Number(m.theta_enc)*r2d).toFixed(1)+'°':'—');
   sta.textContent=m.sta||'-'; zenoh.textContent=m.zenoh||'-';
   if(m.version) fwVer.textContent='fw '+m.version+(m.build?' ('+m.build+')':'');
   if(m.estop){ estopHint.textContent='E-STOP LATCHED — Clear E-Stop (LED double-blink)'; estopHint.style.color='var(--danger)'; }

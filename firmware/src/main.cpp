@@ -53,7 +53,9 @@ static Pca9548a* g_mux = nullptr;
 static EncoderHub* g_enc = nullptr;
 static AccelGyroReader* g_imu = nullptr;
 static HolonomicKinematics* g_kin = nullptr;
-static Odometry* g_odom = nullptr;
+static Odometry* g_odom = nullptr;         // fused (primary)
+static Odometry* g_odom_step = nullptr;    // stepper FAS only
+static Odometry* g_odom_enc = nullptr;     // encoder only
 static MotionController* g_motion = nullptr;
 static WifiPortal* g_wifi = nullptr;
 static WebInterface* g_web = nullptr;
@@ -163,7 +165,9 @@ void setup() {
 
     g_kin = new HolonomicKinematics(g_cfg);
     g_odom = new Odometry(*g_kin, g_cfg);
-    g_motion = new MotionController(g_cfg, g_motors, *g_kin, *g_odom);
+    g_odom_step = new Odometry(*g_kin, g_cfg);
+    g_odom_enc = new Odometry(*g_kin, g_cfg);
+    g_motion = new MotionController(g_cfg, g_motors, *g_kin, *g_odom, *g_odom_step, *g_odom_enc);
 
     g_web = new WebInterface(g_cfg, *g_motion, *g_odom, *g_wifi);
     g_web->begin(&g_ota);
@@ -267,6 +271,12 @@ void loop() {
             if (g_odom) {
                 g_odom->clearGyro();
             }
+            if (g_odom_step) {
+                g_odom_step->clearGyro();
+            }
+            if (g_odom_enc) {
+                g_odom_enc->clearGyro();
+            }
         }
 
         g_motion->update(dt_s, g_gyro_z, g_gyro_valid, now);
@@ -277,8 +287,14 @@ void loop() {
         tryStartZenoh();
     }
 
-    if (g_zenoh && g_zenoh->isReady() && now - g_last_zenoh_odom_ms >= 200) {
+    if (g_zenoh && g_zenoh->isReady() && now - g_last_zenoh_odom_ms >= 50) {
         g_last_zenoh_odom_ms = now;
         g_zenoh->publishOdometry(g_odom->state());
+        if (g_odom_step) {
+            g_zenoh->publishOdometryStepper(g_odom_step->state());
+        }
+        if (g_odom_enc) {
+            g_zenoh->publishOdometryEncoder(g_odom_enc->state());
+        }
     }
 }

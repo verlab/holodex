@@ -17,9 +17,11 @@ struct MotorDTO {
 
 /**
  * Zenoh bridge:
- *   holodex/cmd_vel     (sub) JSON twist for ROS
- *   holodex/odom        (pub) JSON odometry
- *   demo/pc_to_esp      (sub) raw 4×int32 step Hz — Qt app compatibility
+ *   holodex/cmd_vel          (sub) JSON twist for ROS / experiments
+ *   holodex/odom             (pub) fused odometry (encoder blend + yaw KF)
+ *   holodex/odom/stepper     (pub) FastAccelStepper-only dead reckoning
+ *   holodex/odom/encoder     (pub) AS5600-only wheel odometry
+ *   demo/pc_to_esp           (sub) raw 4×int32 step Hz — Qt compatibility
  */
 class ZenohStateManager {
 public:
@@ -42,6 +44,8 @@ public:
     }
 
     void publishOdometry(const OdometryState& state);
+    void publishOdometryStepper(const OdometryState& state);
+    void publishOdometryEncoder(const OdometryState& state);
     void loop();
 
 private:
@@ -49,9 +53,12 @@ private:
     static void staticMotorHandler(z_loaned_sample_t* sample, void* arg);
     void onCmdVel(const z_loaned_sample_t* sample);
     void onMotorDto(const z_loaned_sample_t* sample);
+    void publishNamed(z_owned_publisher_t& pub, const OdometryState& state, const char* source);
 
     z_owned_session_t session_{};
     z_owned_publisher_t odom_pub_{};
+    z_owned_publisher_t odom_step_pub_{};
+    z_owned_publisher_t odom_enc_pub_{};
     z_owned_subscriber_t cmd_sub_{};
     z_owned_subscriber_t motor_sub_{};
     bool zenoh_ready_ = false;

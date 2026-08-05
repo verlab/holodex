@@ -23,11 +23,20 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
         return;
     }
 
-    z_view_keyexpr_t odom_ke;
-    z_view_keyexpr_from_str_unchecked(&odom_ke, "holodex/odom");
-    if (z_declare_publisher(z_session_loan(&session_), &odom_pub_, z_view_keyexpr_loan(&odom_ke),
-                            NULL) < 0) {
-        Serial.println("[Zenoh] Failed to declare holodex/odom publisher");
+    auto declare_pub = [&](z_owned_publisher_t& pub, const char* ke, const char* label) -> bool {
+        z_view_keyexpr_t view;
+        z_view_keyexpr_from_str_unchecked(&view, ke);
+        if (z_declare_publisher(z_session_loan(&session_), &pub, z_view_keyexpr_loan(&view),
+                                NULL) < 0) {
+            Serial.printf("[Zenoh] Failed to declare %s\n", label);
+            return false;
+        }
+        return true;
+    };
+
+    if (!declare_pub(odom_pub_, "holodex/odom", "holodex/odom") ||
+        !declare_pub(odom_step_pub_, "holodex/odom/stepper", "holodex/odom/stepper") ||
+        !declare_pub(odom_enc_pub_, "holodex/odom/encoder", "holodex/odom/encoder")) {
         return;
     }
 
@@ -41,7 +50,6 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
         return;
     }
 
-    // Qt desktop app compatibility (raw motor step Hz)
     z_view_keyexpr_t motor_ke;
     z_view_keyexpr_from_str_unchecked(&motor_ke, "demo/pc_to_esp");
     z_owned_closure_sample_t motor_closure;
@@ -54,7 +62,7 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
     }
 
     zenoh_ready_ = true;
-    Serial.println("[Zenoh] Ready  cmd_vel + demo/pc_to_esp  pub=holodex/odom");
+    Serial.println("[Zenoh] Ready  sub=cmd_vel  pub=odom|odom/stepper|odom/encoder");
 }
 
 ZenohStateManager::~ZenohStateManager() {
@@ -119,7 +127,8 @@ void ZenohStateManager::onMotorDto(const z_loaned_sample_t* sample) {
     }
 }
 
-void ZenohStateManager::publishOdometry(const OdometryState& state) {
+void ZenohStateManager::publishNamed(z_owned_publisher_t& pub, const OdometryState& state,
+                                     const char* source) {
     if (!zenoh_ready_) {
         return;
     }
@@ -132,8 +141,13 @@ void ZenohStateManager::publishOdometry(const OdometryState& state) {
     doc["vy"] = state.twist.vy;
     doc["omega"] = state.twist.omega;
     doc["stamp_ms"] = state.stamp_ms;
+    doc["source"] = source;
+    JsonArray wh = doc["wheels"].to<JsonArray>();
+    for (int i = 0; i < 4; ++i) {
+        wh.add(state.wheel_hz[i]);
+    }
 
-    char buf[256];
+    char buf[320];
     const size_t n = serializeJson(doc, buf, sizeof(buf));
     if (n == 0 || n >= sizeof(buf)) {
         return;
@@ -141,7 +155,19 @@ void ZenohStateManager::publishOdometry(const OdometryState& state) {
 
     z_owned_bytes_t data;
     z_bytes_copy_from_str(&data, buf);
-    z_publisher_put(z_publisher_loan(&odom_pub_), z_bytes_move(&data), NULL);
+    z_publisher_put(z_publisher_loan(&pub), z_bytes_move(&data), NULL);
+}
+
+void ZenohStateManager::publishOdometry(const OdometryState& state) {
+    publishNamed(odom_pub_, state, "fused");
+}
+
+void ZenohStateManager::publishOdometryStepper(const OdometryState& state) {
+    publishNamed(odom_step_pub_, state, "stepper");
+}
+
+void ZenohStateManager::publishOdometryEncoder(const OdometryState& state) {
+    publishNamed(odom_enc_pub_, state, "encoder");
 }
 
 void ZenohStateManager::loop() {}
