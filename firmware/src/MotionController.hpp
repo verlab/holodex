@@ -48,17 +48,19 @@ public:
             return;
         }
         cancelMove();
+        // Keep normalized copy for timeout/refresh path; drive with SI IK
         Twist2D n;
         n.vx = (cfg_.max_vx > 1e-6f) ? (si.vx / cfg_.max_vx) : 0.0f;
         n.vy = (cfg_.max_vy > 1e-6f) ? (si.vy / cfg_.max_vy) : 0.0f;
         n.omega = (cfg_.max_omega > 1e-6f) ? (si.omega / cfg_.max_omega) : 0.0f;
         zenoh_cmd_.twist = clampNorm(n);
+        zenoh_si_ = si;
         zenoh_cmd_.source = CmdSource::Zenoh;
         zenoh_cmd_.stamp_ms = now_ms;
         mode_ = Mode::Cinematic;
 
         float hz[4] = {};
-        kin_.inverseNormalized(zenoh_cmd_.twist, hz);
+        kin_.inverseSi(si, hz);
         applyWheelHz(hz);
         active_source_ = CmdSource::Zenoh;
         copyHz(hz);
@@ -210,7 +212,7 @@ public:
             kin_.inverseNormalized(web_cmd_.twist, cmd_hz);
             active_source_ = CmdSource::Web;
         } else if (zenoh_fresh) {
-            kin_.inverseNormalized(zenoh_cmd_.twist, cmd_hz);
+            kin_.inverseSi(zenoh_si_, cmd_hz);
             active_source_ = CmdSource::Zenoh;
         } else {
             // Timeout → stop + re-hold (exit freewheel test)
@@ -250,6 +252,7 @@ private:
     Stepper* motors_[4] = {};
     VelocityCommand web_cmd_{};
     VelocityCommand zenoh_cmd_{};
+    Twist2D zenoh_si_{};  // last SI cmd_vel (for accurate mecanum IK on refresh)
     CmdSource active_source_ = CmdSource::None;
     Mode mode_ = Mode::Idle;
     bool estop_ = false;

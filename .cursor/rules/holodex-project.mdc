@@ -5,7 +5,7 @@ alwaysApply: true
 
 # HoloDex (VerLab)
 
-Omnidirectional lab robot: 4× NEMA23 steppers + 3D-printed omni wheels. Private VerLab repo.
+Omnidirectional lab robot: 4× NEMA23 steppers + mecanum wheels. Private VerLab repo.
 
 ## Control architecture (firmware-centric)
 
@@ -36,7 +36,7 @@ Zenoh holodex/cmd_vel ─┘         │
 - SoftAP SSID default `HoloDex` / `holodex123` → `http://192.168.4.1/` (WS `:81`)
 - WIFI_AP_STA: AP always on; STA optional for Zenoh/lab network (NVS config via web)
 - Zenoh topics (ROS-oriented JSON): `holodex/cmd_vel` (sub), `holodex/odom` (pub)
-- Geometry: `r=0.05 m`, `lx=0.19 m` (38 cm wheelbase/2), `ly=0.195 m` (39 cm track/2), `steps_per_rev=6400` (32 µstep); driver 2 A via Vref
+- Geometry (mecanum): `r=0.05 m`, `lx=0.19 m`, `ly=0.195 m`, `L=lx+ly`, `steps_per_rev=6400` (32 µstep); IK `v=vx±vy±L·ω` about chassis center; driver 2 A via Vref
 
 ## Contribution
 

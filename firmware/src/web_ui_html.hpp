@@ -98,7 +98,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button id="stop">Stop</button>
       <button class="ok" id="resetOdom">Reset odom</button>
     </div>
-    <p class="hint" id="estopHint">Left = XY translate · Right X = yaw. If yaw/strafe still feel swapped, say so — mapping is chassis-calibrated.</p>
+    <p class="hint" id="estopHint">Left = XY translate · Right X = yaw (mecanum, spin about center). Flip M0–3 / enc in Config if a wheel is mirrored.</p>
   </section>
   <section class="card">
     <h2>Odometry</h2>
@@ -305,28 +305,22 @@ document.querySelectorAll('.tab').forEach(btn=>{
 });
 
 /**
- * Holonomic mix (SI corners + 45° dirs). On this chassis the geometric
- * "dirY" column produces yaw and the "ω×r" column produces strafe — so the
- * stick maps: forward→dirX, yaw→dirY, strafe→rotation (swapped vs textbook).
+ * Mecanum mix (matches firmware HolonomicKinematics).
+ * Motor order: M0 FR, M1 RR, M2 FL, M3 RL.
+ * Stick-normalized: L=1 so full yaw matches full translate before peak scale.
+ *   FR =  vx + vy + ω
+ *   RR =  vx − vy + ω
+ *   FL =  vx − vy − ω
+ *   RL =  vx + vy − ω
  */
-function getDirection(dirX, yawCmd, strafeCmd){
-  const lx=lxM, ly=lyM;
-  const corners=[[+lx,-ly],[-lx,-ly],[+lx,+ly],[-lx,+ly]];
-  const dirs=[[-1,-1],[-1,+1],[+1,-1],[+1,+1]];
-  const R=Math.hypot(lx,ly)||1;
-  return corners.map(([x,y],i)=>{
-    const dn=Math.hypot(dirs[i][0],dirs[i][1])||1;
-    const ux=dirs[i][0]/dn, uy=dirs[i][1]/dn;
-    const transl=dirX*ux + yawCmd*uy;
-    const strafe=strafeCmd*(x*uy - y*ux)/R;
-    return transl+strafe;
-  });
+function mecanumMix(vx, vy, w){
+  return [vx+vy+w, vx-vy+w, vx-vy-w, vx+vy-w];
 }
 
 function motorsFromStick(sx, sy, rot, speedFrac){
   if(estopLocal) return [0,0,0,0];
-  // sy=forward, rot=yaw, sx=strafe-right
-  let dirs=getDirection(sy, rot, sx);
+  // sy=forward (vx), sx=strafe (vy), rot=yaw (ω)
+  let dirs=mecanumMix(sy, sx, rot);
   const peak=Math.max(...dirs.map(v=>Math.abs(v)), 1e-9);
   if(peak>1) dirs=dirs.map(v=>v/peak);
   const hz=speedFrac*maxStepHz;
@@ -338,8 +332,7 @@ function motorsFromTest(){
   return motorPct.map(p=>Math.round((p/100)*s*maxStepHz));
 }
 function motorsYawSpin(speedFrac, sense){
-  // Yaw uses the dirY column on this chassis
-  return getDirection(0, sense, 0).map(v=>Math.round(v*speedFrac*maxStepHz));
+  return mecanumMix(0, 0, sense).map(v=>Math.round(v*speedFrac*maxStepHz));
 }
 
 function applyOdom(m){
