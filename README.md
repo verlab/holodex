@@ -8,38 +8,45 @@ VerLab **mecanum** robot: 4× NEMA23 steppers, AS5600 encoders (PCA9548A), BMI16
 |------|-------------|
 | **Actuation** | NEMA23 steppers + drivers (2 A via Vref) |
 | **Mechanics** | 4WD mecanum wheels — spin about chassis center |
-| **Onboard control** | Mecanum IK/FK, dual odometry, SoftAP web teleop |
+| **Onboard control** | Mecanum IK/FK, SoftAP web teleop, optional enc speed PI |
 | **Sensing** | 4× AS5600 + BMI160 on PCA9548A |
-| **ROS path** | Zenoh (`holodex/cmd_vel`, `holodex/odom` + compare topics) |
+| **Odometry** | Three parallel streams for comparison (wheels / wheels+enc / full+IMU) |
+| **ROS path** | Zenoh `cmd_vel` + three `odom*` topics |
 
 ## Architecture (high level)
 
 ```mermaid
 flowchart LR
   subgraph Host["Host / lab PC"]
-    WEB["Phone / browser SoftAP UI"]
-    ZCLI["Zenoh clients / experiment script"]
-    ROUTER["Zenoh router :7447"]
+    WEB["SoftAP web UI"]
+    EXP["Experiment script"]
+    RTR["Zenoh router\n:7447"]
   end
 
-  subgraph ESP["ESP32 firmware"]
+  subgraph ESP["ESP32"]
     MC["MotionController"]
-    KIN["Mecanum IK/FK"]
-    ODOM["Odometry ×3\nfused · stepper · encoder"]
-    ENC["EncoderHub AS5600"]
+    KIN["Mecanum IK"]
+    FAS["Steppers ×4"]
+    ENC["AS5600 ×4"]
     IMU["BMI160"]
-    FAS["FastAccelStepper ×4"]
+    OW["odom wheels"]
+    OWE["odom wheels+enc"]
+    OF["odom full"]
   end
 
-  WEB -->|WS / HTTP cmd| MC
-  ZCLI --> ROUTER
-  ROUTER -->|cmd_vel| MC
+  WEB -->|teleop| MC
+  EXP --> RTR -->|cmd_vel| MC
   MC --> KIN --> FAS
-  ENC --> ODOM
-  FAS -->|measured Hz| ODOM
-  IMU -->|gyro Z| ODOM
-  ODOM -->|odom streams| ROUTER
-  ODOM --> WEB
+  FAS -->|Hz| OW
+  FAS -->|Hz| OWE
+  ENC -->|Hz| OWE
+  FAS -->|Hz| OF
+  ENC -->|Hz| OF
+  IMU -->|gyro Z| OF
+  OW --> RTR
+  OWE --> RTR
+  OF --> RTR
+  OF --> WEB
 ```
 
 ## Architecture (detailed)
@@ -47,59 +54,97 @@ flowchart LR
 ```mermaid
 flowchart TB
   subgraph Inputs
-    SoftAP["SoftAP HoloDex\n192.168.4.1 :80/:81"]
+    SoftAP["SoftAP\n192.168.4.1 :80 / :81"]
     STA["STA lab Wi‑Fi"]
-    ZIN["Zenoh sub\nholodex/cmd_vel\ndemo/pc_to_esp"]
+    Zcmd["Zenoh sub\nholodex/cmd_vel"]
   end
 
-  subgraph Control["50 Hz control tick"]
-    MUX["PCA9548A\nch0-3 AS5600 · ch4 BMI160"]
-    SAMPLE["EncoderHub.sample()\nAccelGyroReader.read()"]
-    MODE{"Mode"}
-    IK["HolonomicKinematics\nv = vx ± vy ± L·ω\nL = lx+ly"]
-    PI["Optional enc speed PI"]
-    APPLY["applyWheelHz\nmotor_sign · accel ramp"]
+  subgraph Tick["Control @ 50 Hz"]
+    MUX["PCA9548A\nch0–3 AS5600 · ch4 IMU"]
+    SAMP["sample encoders + IMU"]
+    MODE{"command mode"}
+    IK["IK: v = vx ± vy ± L·ω\nL = lx + ly"]
+    PI["enc speed PI optional"]
+    OUT["applyWheelHz → FAS"]
   end
 
-  subgraph OdomBlock["Odometry streams"]
-    FASHz["FAS getCurrentSpeedHz"]
-    ENCHz["AS5600 → step Hz"]
-    BLEND["blend = α·enc + 1−α·fas"]
-    OW["odom/wheels\nFAS · yaw wheels"]
-    OWE["odom/wheels_enc\nblend · yaw wheels"]
-    OF["odom full\nblend · yaw IMU+KF"]
+  subgraph Rates["Wheel rate sources"]
+    FASHz["FAS measured Hz"]
+    ENCHz["AS5600 → Hz"]
+    BLEND["blend α·enc + 1−α·fas"]
   end
 
-  subgraph Outputs
-    WS["WebSocket odom JSON"]
-    ZOUT["Zenoh pub\nholodex/odom\nholodex/odom/wheels\nholodex/odom/wheels_enc"]
-    MOTORS["NEMA23 ×4"]
+  subgraph Odom["Three odometry streams"]
+    OW["holodex/odom/wheels\nrates: FAS\nyaw: wheel FK · no IMU"]
+    OWE["holodex/odom/wheels_enc\nrates: blend\nyaw: wheel FK · no IMU"]
+    OF["holodex/odom\nrates: blend\nyaw: gyro + Kalman"]
+  end
+
+  subgraph Pub["Outputs"]
+    WS["WebSocket /api/odom"]
+    ZP["Zenoh publishers"]
+    MOT["NEMA23 ×4"]
   end
 
   SoftAP --> MODE
-  STA --> ZIN --> MODE
-  MUX --> SAMPLE --> MODE
-  MODE -->|cinematic / zenoh SI| IK --> PI --> APPLY --> MOTORS
-  MODE -->|raw m0..m3| APPLY
-  APPLY --> FASHz
-  SAMPLE --> ENCHz
+  STA --> Zcmd --> MODE
+  MUX --> SAMP
+  SAMP --> MODE
+  MODE -->|twist / cinematic| IK --> PI --> OUT --> MOT
+  MODE -->|raw m0..m3| OUT
+  OUT --> FASHz
+  SAMP --> ENCHz
   FASHz --> OW
   FASHz --> BLEND
   ENCHz --> BLEND
   BLEND --> OWE
   BLEND --> OF
-  SAMPLE -->|gyro Z| OF
+  SAMP -->|gyro Z only here| OF
+  OW --> ZP
+  OWE --> ZP
+  OF --> ZP
   OF --> WS
-  OF --> ZOUT
-  OW --> ZOUT
-  OWE --> ZOUT
 ```
 
-### Why kinematics changed (vs early Zenoh-only firmware)
+## Odometry comparison (article)
 
-At commit `5ed7a02` the ESP32 only accepted **raw motor step-Hz** over Zenoh — there was **no onboard IK/odometry**. Later firmware introduced a 45° **omni û-model** with yaw/strafe columns swapped for teleop; that mix does **not** match mecanum and does not keep yaw rotation about the geometric center, so integrated θ drifted badly.
+```mermaid
+flowchart LR
+  subgraph Sources
+    FAS["Stepper ramp Hz"]
+    ENC["AS5600 Hz"]
+    GYRO["BMI160 ωz"]
+  end
 
-Firmware **0.4.0+** uses standard mecanum (same structure as [Shimraz/Kinematics-of-Mobile-Robot](https://github.com/Shimraz/Kinematics-of-Mobile-Robot)):
+  subgraph Streams
+    W["wheels\nFAS + yaw wheels"]
+    WE["wheels_enc\nblend + yaw wheels"]
+    F["full\nblend + yaw IMU"]
+  end
+
+  FAS --> W
+  FAS --> WE
+  ENC --> WE
+  FAS --> F
+  ENC --> F
+  GYRO --> F
+
+  W --> CMP["experiment script\nnpz · plots · RMSE"]
+  WE --> CMP
+  F --> CMP
+```
+
+| Stream | Topic | Wheel rates | Yaw |
+|--------|-------|-------------|-----|
+| **wheels** | `holodex/odom/wheels` | FastAccelStepper only | wheel FK (no IMU) |
+| **wheels_enc** | `holodex/odom/wheels_enc` | FAS + AS5600 blend | wheel FK (no IMU) |
+| **full** | `holodex/odom` | FAS + AS5600 blend | gyro + Kalman |
+
+## Mecanum kinematics
+
+Early firmware (`5ed7a02`) only accepted **raw motor Hz** over Zenoh (no onboard IK). A later 45° omni û-model with swapped yaw/strafe columns did **not** spin about the chassis center.
+
+Firmware **0.4.x** uses standard mecanum ([reference](https://github.com/Shimraz/Kinematics-of-Mobile-Robot)):
 
 \[
 \begin{aligned}
@@ -111,7 +156,7 @@ v_{RL} &= v_x + v_y - L\omega
 \quad L = l_x + l_y
 \]
 
-Motor order on HoloDex: **M0=FR, M1=RR, M2=FL, M3=RL**.
+Motor order: **M0=FR, M1=RR, M2=FL, M3=RL**.
 
 ## Repository layout
 
@@ -119,7 +164,7 @@ Motor order on HoloDex: **M0=FR, M1=RR, M2=FL, M3=RL**.
 |------|------|
 | `firmware/` | ESP32 PlatformIO stack (primary) |
 | `docker/` | Zenoh router (+ experiment profile) |
-| `experiments/` | Dual-odom capture script (npz / plots / MSE) |
+| `experiments/` | Triple-odom capture (npz / plots / MSE) |
 | `src/` | Legacy desktop UI (optional) |
 
 ## Quick start (web teleop)
@@ -151,8 +196,6 @@ docker compose --profile experiment run --rm experiment
 ```
 
 Details: [experiments/README.md](experiments/README.md).
-
-Topics:
 
 | Topic | Direction | Content |
 |-------|-----------|---------|
