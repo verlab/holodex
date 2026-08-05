@@ -12,12 +12,12 @@ Or locally (router already up):
   python experiments/record_odom_compare.py --endpoint tcp/127.0.0.1:7447
 
 Publishes a yaw + translate trajectory on holodex/cmd_vel and records:
-  holodex/odom           (fused)
-  holodex/odom/stepper   (FAS dead-reckoning)
-  holodex/odom/encoder   (AS5600-only)
+  holodex/odom/wheels       — stepper rates, yaw from wheels (no IMU)
+  holodex/odom/wheels_enc   — encoder blend, yaw from wheels (no IMU)
+  holodex/odom              — wheels+enc+IMU (primary / full)
 
 Outputs under experiments/out/<timestamp>/ :
-  odom_compare.npz, metrics.json, trajectory.png, theta.png, err.png
+  odom_compare.npz, metrics.json, trajectory.png, theta.png, err.png, metrics.png
 """
 
 from __future__ import annotations
@@ -43,11 +43,12 @@ except ImportError as exc:  # pragma: no cover
 
 
 TOPICS = {
-    "fused": "holodex/odom",
-    "stepper": "holodex/odom/stepper",
-    "encoder": "holodex/odom/encoder",
+    "full": "holodex/odom",                 # wheels + enc + IMU
+    "wheels": "holodex/odom/wheels",        # stepper / FAS only
+    "wheels_enc": "holodex/odom/wheels_enc",  # FAS + AS5600 blend
 }
 CMD_TOPIC = "holodex/cmd_vel"
+REF_STREAM = "full"
 
 
 @dataclass
@@ -195,12 +196,12 @@ def save_plots(out_dir: Path, arrays: dict[str, dict[str, np.ndarray]], metrics:
     fig.savefig(out_dir / "theta.png", dpi=160)
     plt.close(fig)
 
-    # Error of stepper / encoder vs fused on common time base
-    if arrays["fused"]["t"].size >= 2:
-        tq = arrays["fused"]["t"]
-        ref = interp_pose(arrays["fused"], tq)
+    # Error of wheels / wheels_enc vs full (IMU) on common time base
+    if arrays[REF_STREAM]["t"].size >= 2:
+        tq = arrays[REF_STREAM]["t"]
+        ref = interp_pose(arrays[REF_STREAM], tq)
         fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
-        for name in ("stepper", "encoder"):
+        for name in ("wheels", "wheels_enc"):
             if arrays[name]["t"].size < 2:
                 continue
             o = interp_pose(arrays[name], tq)
@@ -211,7 +212,7 @@ def save_plots(out_dir: Path, arrays: dict[str, dict[str, np.ndarray]], metrics:
         axes[0].set_ylabel("|Δxy| [m]")
         axes[1].set_ylabel("|Δθ| [deg]")
         axes[1].set_xlabel("t [s]")
-        axes[0].set_title("Error vs fused odometry")
+        axes[0].set_title("Error vs full (wheels+enc+IMU)")
         for ax in axes:
             ax.grid(True, alpha=0.3)
             ax.legend()
@@ -301,16 +302,20 @@ def main() -> int:
         arrays = {k: v.as_arrays() for k, v in bufs.items()}
         n_counts = dict(counts)
 
-    # Align on fused time base for metrics
+    # Align on full (IMU) time base; also compare wheels vs wheels_enc
     metrics = []
-    if arrays["fused"]["t"].size >= 2:
-        tq = arrays["fused"]["t"]
-        ref = interp_pose(arrays["fused"], tq)
-        for name in ("stepper", "encoder"):
+    if arrays[REF_STREAM]["t"].size >= 2:
+        tq = arrays[REF_STREAM]["t"]
+        ref = interp_pose(arrays[REF_STREAM], tq)
+        for name in ("wheels", "wheels_enc"):
             if arrays[name]["t"].size < 2:
                 continue
             other = interp_pose(arrays[name], tq)
-            metrics.append(metrics_vs(ref, other, f"{name}_vs_fused"))
+            metrics.append(metrics_vs(ref, other, f"{name}_vs_full"))
+        if arrays["wheels"]["t"].size >= 2 and arrays["wheels_enc"]["t"].size >= 2:
+            w = interp_pose(arrays["wheels"], tq)
+            we = interp_pose(arrays["wheels_enc"], tq)
+            metrics.append(metrics_vs(w, we, "wheels_enc_vs_wheels"))
 
     meta = {
         "endpoint": args.endpoint,

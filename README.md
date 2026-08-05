@@ -65,14 +65,14 @@ flowchart TB
     FASHz["FAS getCurrentSpeedHz"]
     ENCHz["AS5600 → step Hz"]
     BLEND["blend = α·enc + 1−α·fas"]
-    OS["odom/stepper"]
-    OE["odom/encoder"]
-    OF["odom fused\n+ yaw Kalman"]
+    OW["odom/wheels\nFAS · yaw wheels"]
+    OWE["odom/wheels_enc\nblend · yaw wheels"]
+    OF["odom full\nblend · yaw IMU+KF"]
   end
 
   subgraph Outputs
     WS["WebSocket odom JSON"]
-    ZOUT["Zenoh pub\nholodex/odom\nholodex/odom/stepper\nholodex/odom/encoder"]
+    ZOUT["Zenoh pub\nholodex/odom\nholodex/odom/wheels\nholodex/odom/wheels_enc"]
     MOTORS["NEMA23 ×4"]
   end
 
@@ -83,17 +83,16 @@ flowchart TB
   MODE -->|raw m0..m3| APPLY
   APPLY --> FASHz
   SAMPLE --> ENCHz
-  FASHz --> OS
-  ENCHz --> OE
+  FASHz --> OW
   FASHz --> BLEND
-  ENCHz --> BLEND --> OF
+  ENCHz --> BLEND
+  BLEND --> OWE
+  BLEND --> OF
   SAMPLE -->|gyro Z| OF
-  SAMPLE -->|gyro Z| OS
-  SAMPLE -->|gyro Z| OE
   OF --> WS
   OF --> ZOUT
-  OS --> ZOUT
-  OE --> ZOUT
+  OW --> ZOUT
+  OWE --> ZOUT
 ```
 
 ### Why kinematics changed (vs early Zenoh-only firmware)
@@ -158,9 +157,9 @@ Topics:
 | Topic | Direction | Content |
 |-------|-----------|---------|
 | `holodex/cmd_vel` | → robot | `{"vx","vy","omega"}` SI |
-| `holodex/odom` | ← robot | fused pose |
-| `holodex/odom/stepper` | ← robot | FAS-only dead reckoning |
-| `holodex/odom/encoder` | ← robot | AS5600-only |
+| `holodex/odom` | ← robot | wheels+enc+IMU (full) |
+| `holodex/odom/wheels` | ← robot | stepper rates, yaw from wheels |
+| `holodex/odom/wheels_enc` | ← robot | encoder blend, yaw from wheels |
 
 ## Contribution
 

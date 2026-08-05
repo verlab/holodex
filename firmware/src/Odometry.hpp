@@ -7,12 +7,11 @@
 #include <cmath>
 
 /**
- * Dead-reckoning from measured wheel step rates (SI) + IMU yaw fusion.
+ * Dead-reckoning from wheel step rates (SI).
  *
- *   - translation (vx, vy) from wheel FK (encoder-preferred rates upstream)
- *   - yaw: optional 2-state Kalman [theta, gyro_bias] when gyro present;
- *     otherwise integrate wheel omega
- *   - light EMA on body twist to reject encoder quantization noise
+ * Yaw modes (for fair article comparisons):
+ *   use_imu=false → integrate wheel FK ω only
+ *   use_imu=true  → gyro (+ optional 2-state Kalman bias)
  */
 class Odometry {
 public:
@@ -34,12 +33,13 @@ public:
     }
 
     /**
-     * @param step_hz  measured wheel rates in logical IK frame (step/s)
-     * @param gyro_z   rad/s about +z
-     * @param gyro_valid true if gyro_z is usable
+     * @param step_hz   wheel rates in logical IK frame (step/s)
+     * @param use_imu   if false, ignore gyro entirely (wheels-only yaw)
+     * @param label     short tag stored in fusionMode() for UI/telemetry
      */
     const OdometryState& update(const float step_hz[4], float dt_s, float gyro_z,
-                                bool gyro_valid, uint32_t stamp_ms) {
+                                bool gyro_valid, uint32_t stamp_ms, bool use_imu,
+                                const char* label) {
         if (dt_s <= 0.0f) {
             return state_;
         }
@@ -50,16 +50,17 @@ public:
 
         const Twist2D wheel = kin_.forwardSi(step_hz);
 
-        // EMA on translation (encoder quantization / I2C jitter)
         constexpr float a_xy = 0.35f;
         filt_.vx += a_xy * (wheel.vx - filt_.vx);
         filt_.vy += a_xy * (wheel.vy - filt_.vy);
+        filt_.omega += a_xy * (wheel.omega - filt_.omega);
 
         Twist2D body;
         body.vx = filt_.vx;
         body.vy = filt_.vy;
 
-        if (gyro_valid && !isnan(gyro_z)) {
+        const bool imu_ok = use_imu && gyro_valid && !isnan(gyro_z);
+        if (imu_ok) {
             last_gyro_z_ = gyro_z;
             have_gyro_ = true;
             if (cfg_.yaw_kalman) {
@@ -70,33 +71,25 @@ public:
                 yaw_kf_.updateWheelOmega(wheel.omega, gyro_z);
                 body.omega = gyro_z - yaw_kf_.bias();
                 state_.pose.theta = yaw_kf_.theta();
-                fusion_ = "enc+gyroKF";
             } else {
                 body.omega = gyro_z;
                 state_.pose.theta = wrapPi(state_.pose.theta + body.omega * dt_s);
-                fusion_ = "enc+gyro";
             }
+            fusion_ = label ? label : "imu";
         } else {
-            body.omega = wheel.omega;
-            filt_.omega += a_xy * (wheel.omega - filt_.omega);
             body.omega = filt_.omega;
             state_.pose.theta = wrapPi(state_.pose.theta + body.omega * dt_s);
             if (yaw_kf_.ready()) {
                 yaw_kf_.setTheta(state_.pose.theta);
             }
-            fusion_ = have_gyro_ ? "wheels(gyro stale)" : "wheels";
+            fusion_ = label ? label : "wheels";
         }
 
         state_.twist = body;
 
-        // Integrate translation in world frame using (possibly KF) heading
         const float th = state_.pose.theta;
         const float c = cosf(th);
         const float s = sinf(th);
-        // When KF owns theta, translation still uses body twist × dt at current heading
-        // Mid-point: use heading before omega integration for non-KF path already applied;
-        // for KF path theta is post-predict — use previous heading for xy:
-        // (already advanced theta — use body rates with current th; small error at 50 Hz)
         state_.pose.x += (c * body.vx - s * body.vy) * dt_s;
         state_.pose.y += (s * body.vx + c * body.vy) * dt_s;
         state_.stamp_ms = stamp_ms;

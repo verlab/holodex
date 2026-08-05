@@ -3,6 +3,17 @@
 #include <ArduinoJson.h>
 #include <cstring>
 
+bool ZenohStateManager::declarePub(z_owned_publisher_t& pub, const char* ke, const char* label) {
+    z_view_keyexpr_t view;
+    z_view_keyexpr_from_str_unchecked(&view, ke);
+    if (z_declare_publisher(z_session_loan(&session_), &pub, z_view_keyexpr_loan(&view), NULL) <
+        0) {
+        Serial.printf("[Zenoh] Failed to declare %s\n", label);
+        return false;
+    }
+    return true;
+}
+
 ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
     z_owned_config_t config;
     z_config_default(&config);
@@ -23,20 +34,10 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
         return;
     }
 
-    auto declare_pub = [&](z_owned_publisher_t& pub, const char* ke, const char* label) -> bool {
-        z_view_keyexpr_t view;
-        z_view_keyexpr_from_str_unchecked(&view, ke);
-        if (z_declare_publisher(z_session_loan(&session_), &pub, z_view_keyexpr_loan(&view),
-                                NULL) < 0) {
-            Serial.printf("[Zenoh] Failed to declare %s\n", label);
-            return false;
-        }
-        return true;
-    };
-
-    if (!declare_pub(odom_pub_, "holodex/odom", "holodex/odom") ||
-        !declare_pub(odom_step_pub_, "holodex/odom/stepper", "holodex/odom/stepper") ||
-        !declare_pub(odom_enc_pub_, "holodex/odom/encoder", "holodex/odom/encoder")) {
+    // Three streams only (avoid extra flash for legacy alias pubs)
+    if (!declarePub(odom_pub_, "holodex/odom", "holodex/odom") ||
+        !declarePub(odom_wheels_pub_, "holodex/odom/wheels", "holodex/odom/wheels") ||
+        !declarePub(odom_wenc_pub_, "holodex/odom/wheels_enc", "holodex/odom/wheels_enc")) {
         return;
     }
 
@@ -62,7 +63,7 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
     }
 
     zenoh_ready_ = true;
-    Serial.println("[Zenoh] Ready  sub=cmd_vel  pub=odom|odom/stepper|odom/encoder");
+    Serial.println("[Zenoh] Ready  pub=odom | odom/wheels | odom/wheels_enc");
 }
 
 ZenohStateManager::~ZenohStateManager() {
@@ -159,15 +160,15 @@ void ZenohStateManager::publishNamed(z_owned_publisher_t& pub, const OdometrySta
 }
 
 void ZenohStateManager::publishOdometry(const OdometryState& state) {
-    publishNamed(odom_pub_, state, "fused");
+    publishNamed(odom_pub_, state, "wheels+enc+imu");
 }
 
-void ZenohStateManager::publishOdometryStepper(const OdometryState& state) {
-    publishNamed(odom_step_pub_, state, "stepper");
+void ZenohStateManager::publishOdometryWheels(const OdometryState& state) {
+    publishNamed(odom_wheels_pub_, state, "wheels");
 }
 
-void ZenohStateManager::publishOdometryEncoder(const OdometryState& state) {
-    publishNamed(odom_enc_pub_, state, "encoder");
+void ZenohStateManager::publishOdometryWheelsEnc(const OdometryState& state) {
+    publishNamed(odom_wenc_pub_, state, "wheels+enc");
 }
 
 void ZenohStateManager::loop() {}

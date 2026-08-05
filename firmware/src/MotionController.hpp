@@ -30,6 +30,11 @@ public:
     void attachEncoders(EncoderHub* enc) { enc_ = enc; }
     EncoderHub* encoders() const { return enc_; }
 
+    /** Primary: wheels+enc+IMU. Compare: wheels-only, wheels+enc (no IMU). */
+    Odometry& odomFull() { return odom_; }
+    Odometry& odomWheels() { return odom_step_; }
+    Odometry& odomWheelsEnc() { return odom_enc_; }
+    // Aliases kept for older call sites
     Odometry& odomFused() { return odom_; }
     Odometry& odomStepper() { return odom_step_; }
     Odometry& odomEncoder() { return odom_enc_; }
@@ -256,9 +261,9 @@ private:
 
     RobotConfig& cfg_;
     HolonomicKinematics& kin_;
-    Odometry& odom_;       // fused (encoder blend + optional yaw KF) — primary
-    Odometry& odom_step_;  // FastAccelStepper rates only (dead-reckoning baseline)
-    Odometry& odom_enc_;   // AS5600 rates only (zeros if sensor missing)
+    Odometry& odom_;       // wheels + enc blend + IMU yaw (primary / ROS)
+    Odometry& odom_step_;  // FAS wheel rates only, yaw from wheels (no IMU)
+    Odometry& odom_enc_;   // FAS+AS5600 blend, yaw from wheels (no IMU)
     EncoderHub* enc_ = nullptr;
     Stepper* motors_[4] = {};
     VelocityCommand web_cmd_{};
@@ -392,9 +397,12 @@ private:
             measure_src_ = "fas";
         }
 
-        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms);
-        odom_enc_.update(enc, dt_s, gyro_z, gyro_valid, now_ms);
-        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms);
+        // 1) wheels only (stepper ramp) — no IMU
+        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/false, "wheels");
+        // 2) wheels + encoders (blend) — no IMU
+        odom_enc_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/false, "wheels+enc");
+        // 3) wheels + encoders + IMU yaw
+        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/true, "wheels+enc+imu");
     }
 
     static float clampf(float v, float lo, float hi) {

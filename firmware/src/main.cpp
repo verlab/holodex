@@ -53,9 +53,9 @@ static Pca9548a* g_mux = nullptr;
 static EncoderHub* g_enc = nullptr;
 static AccelGyroReader* g_imu = nullptr;
 static HolonomicKinematics* g_kin = nullptr;
-static Odometry* g_odom = nullptr;         // fused (primary)
-static Odometry* g_odom_step = nullptr;    // stepper FAS only
-static Odometry* g_odom_enc = nullptr;     // encoder only
+static Odometry* g_odom = nullptr;         // wheels+enc+IMU (primary)
+static Odometry* g_odom_step = nullptr;    // wheels only (FAS, no IMU)
+static Odometry* g_odom_enc = nullptr;     // wheels+enc blend (no IMU)
 static MotionController* g_motion = nullptr;
 static WifiPortal* g_wifi = nullptr;
 static WebInterface* g_web = nullptr;
@@ -289,12 +289,9 @@ void loop() {
 
     if (g_zenoh && g_zenoh->isReady() && now - g_last_zenoh_odom_ms >= 50) {
         g_last_zenoh_odom_ms = now;
-        g_zenoh->publishOdometry(g_odom->state());
-        if (g_odom_step) {
-            g_zenoh->publishOdometryStepper(g_odom_step->state());
-        }
-        if (g_odom_enc) {
-            g_zenoh->publishOdometryEncoder(g_odom_enc->state());
-        }
+        // Always publish the three comparable streams
+        g_zenoh->publishOdometry(g_odom->state());                 // wheels+enc+imu
+        g_zenoh->publishOdometryWheels(g_odom_step->state());      // wheels
+        g_zenoh->publishOdometryWheelsEnc(g_odom_enc->state());    // wheels+enc
     }
 }

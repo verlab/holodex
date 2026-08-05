@@ -473,14 +473,21 @@ private:
         doc["vy"] = s.twist.vy;
         doc["omega"] = s.twist.omega;
         {
-            const auto& st = motion_.odomStepper().state();
-            doc["x_step"] = st.pose.x;
-            doc["y_step"] = st.pose.y;
-            doc["theta_step"] = st.pose.theta;
-            const auto& en = motion_.odomEncoder().state();
-            doc["x_enc"] = en.pose.x;
-            doc["y_enc"] = en.pose.y;
-            doc["theta_enc"] = en.pose.theta;
+            const auto& w = motion_.odomWheels().state();
+            doc["x_wheels"] = w.pose.x;
+            doc["y_wheels"] = w.pose.y;
+            doc["theta_wheels"] = w.pose.theta;
+            const auto& we = motion_.odomWheelsEnc().state();
+            doc["x_wheels_enc"] = we.pose.x;
+            doc["y_wheels_enc"] = we.pose.y;
+            doc["theta_wheels_enc"] = we.pose.theta;
+            // legacy keys
+            doc["x_step"] = w.pose.x;
+            doc["y_step"] = w.pose.y;
+            doc["theta_step"] = w.pose.theta;
+            doc["x_enc"] = we.pose.x;
+            doc["y_enc"] = we.pose.y;
+            doc["theta_enc"] = we.pose.theta;
         }
         doc["source"] = sourceName(motion_.activeSource());
         doc["sta"] = wifi_.staConnected() ? wifi_.staIp().toString().c_str() : "down";

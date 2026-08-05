@@ -1,11 +1,17 @@
 # HoloDex odometry experiments
 
-Capture **stepper-only**, **encoder-only**, and **fused** odometry over Zenoh for article plots.
+Capture three **independent** odometry streams over Zenoh for article plots:
+
+| Stream | Topic | Wheel rates | Yaw |
+|--------|-------|-------------|-----|
+| **wheels** | `holodex/odom/wheels` | FastAccelStepper only | wheel FK (no IMU) |
+| **wheels_enc** | `holodex/odom/wheels_enc` | FAS + AS5600 blend | wheel FK (no IMU) |
+| **full** | `holodex/odom` | FAS + AS5600 blend | gyro + Kalman |
 
 ## Prerequisites
 
-1. Flash firmware ≥ **0.4.0** (mecanum IK + dual odom streams).
-2. Robot SoftAP config: STA joined to lab Wi‑Fi, Zenoh endpoint `tcp/<PC-LAN-IP>:7447`, Zenoh enabled.
+1. Flash firmware ≥ **0.4.1**.
+2. Robot SoftAP config: STA + Zenoh endpoint `tcp/<PC-LAN-IP>:7447`.
 3. Start the router:
 
 ```bash
@@ -19,16 +25,16 @@ cd docker
 docker compose --profile experiment run --rm experiment
 ```
 
-Outputs land in `experiments/out/<UTC-timestamp>/`:
+Outputs in `experiments/out/<UTC-timestamp>/`:
 
 | File | Content |
 |------|---------|
-| `odom_compare.npz` | Time series for fused / stepper / encoder |
-| `metrics.json` | MSE / RMSE / MAE (xy + θ) vs fused |
+| `odom_compare.npz` | Time series for all three streams |
+| `metrics.json` | MSE / RMSE / MAE (xy + θ) |
 | `trajectory.png` | XY paths |
 | `theta.png` | Heading vs time |
-| `err.png` | Error vs fused |
-| `metrics.png` | RMSE bar chart |
+| `err.png` | Error vs full |
+| `metrics.png` | RMSE bars |
 
 ## Run (host)
 
@@ -37,17 +43,8 @@ pip install -r experiments/requirements.txt
 python experiments/record_odom_compare.py --endpoint tcp/127.0.0.1:7447
 ```
 
-Manual drive (no auto trajectory):
+Manual drive:
 
 ```bash
 python experiments/record_odom_compare.py --record-only --endpoint tcp/127.0.0.1:7447
 ```
-
-## Zenoh topics
-
-| Topic | Source |
-|-------|--------|
-| `holodex/cmd_vel` | Script → robot (JSON `{vx,vy,omega}`) |
-| `holodex/odom` | Fused (encoder blend + yaw Kalman) |
-| `holodex/odom/stepper` | FastAccelStepper rates only |
-| `holodex/odom/encoder` | AS5600 rates only |

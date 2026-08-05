@@ -16,12 +16,16 @@ struct MotorDTO {
 } __attribute__((packed));
 
 /**
- * Zenoh bridge:
- *   holodex/cmd_vel          (sub) JSON twist for ROS / experiments
- *   holodex/odom             (pub) fused odometry (encoder blend + yaw KF)
- *   holodex/odom/stepper     (pub) FastAccelStepper-only dead reckoning
- *   holodex/odom/encoder     (pub) AS5600-only wheel odometry
- *   demo/pc_to_esp           (sub) raw 4×int32 step Hz — Qt compatibility
+ * Zenoh bridge — three comparable odometry streams:
+ *   holodex/cmd_vel              (sub) JSON twist
+ *   holodex/odom                 (pub) wheels+enc+IMU  (primary)
+ *   holodex/odom/wheels          (pub) stepper rates, yaw from wheels
+ *   holodex/odom/wheels_enc      (pub) encoder blend, yaw from wheels
+ *   demo/pc_to_esp               (sub) raw motor Hz
+ *
+ * Legacy aliases also published:
+ *   holodex/odom/stepper  → same as wheels
+ *   holodex/odom/encoder  → same as wheels_enc
  */
 class ZenohStateManager {
 public:
@@ -43,9 +47,12 @@ public:
         motor_ctx_ = ctx;
     }
 
-    void publishOdometry(const OdometryState& state);
-    void publishOdometryStepper(const OdometryState& state);
-    void publishOdometryEncoder(const OdometryState& state);
+    void publishOdometry(const OdometryState& state);             // full
+    void publishOdometryWheels(const OdometryState& state);       // wheels only
+    void publishOdometryWheelsEnc(const OdometryState& state);    // wheels+enc
+    // Back-compat names
+    void publishOdometryStepper(const OdometryState& state) { publishOdometryWheels(state); }
+    void publishOdometryEncoder(const OdometryState& state) { publishOdometryWheelsEnc(state); }
     void loop();
 
 private:
@@ -54,11 +61,12 @@ private:
     void onCmdVel(const z_loaned_sample_t* sample);
     void onMotorDto(const z_loaned_sample_t* sample);
     void publishNamed(z_owned_publisher_t& pub, const OdometryState& state, const char* source);
+    bool declarePub(z_owned_publisher_t& pub, const char* ke, const char* label);
 
     z_owned_session_t session_{};
     z_owned_publisher_t odom_pub_{};
-    z_owned_publisher_t odom_step_pub_{};
-    z_owned_publisher_t odom_enc_pub_{};
+    z_owned_publisher_t odom_wheels_pub_{};
+    z_owned_publisher_t odom_wenc_pub_{};
     z_owned_subscriber_t cmd_sub_{};
     z_owned_subscriber_t motor_sub_{};
     bool zenoh_ready_ = false;
