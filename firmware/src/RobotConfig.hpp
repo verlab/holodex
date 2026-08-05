@@ -48,7 +48,7 @@ struct RobotConfig {
     // AS5600 on PCA9548A: which mux channel feeds motor Mi, and shaft polarity
     // Physical wiring: M0←ch0, M1←ch1, M2←ch4, M3←ch5 (IMU on ch6)
     int8_t enc_ch[4] = {0, 1, 4, 5};
-    int8_t enc_sign[4] = {1, 1, 1, 1}; // -1 if magnet/mount is flipped vs IK
+    int8_t enc_sign[4] = {-1, 1, 1, -1};  // M0/M3: raw fwd angle sense vs DIR
     bool enc_odom = true;              // prefer encoder rates for odometry
     bool enc_speed_fb = true;          // PI speed assist from encoder vs command
     float enc_blend = 0.85f;           // weight of encoder vs FAS when both exist
@@ -210,6 +210,19 @@ struct RobotConfig {
             prefs.putInt("es3", 1);
             prefs.putInt("cfg_ver", 11);
             Serial.println("[CFG] migrated to v11: enc logical frame via motor_sign");
+        }
+        if (prefs.getInt("cfg_ver", 0) < 12) {
+            // Bench: forward → raw angle ↑ M0/M2, ↓ M1/M3. Map to electrical then logical.
+            enc_sign[0] = -1;
+            enc_sign[1] = 1;
+            enc_sign[2] = 1;
+            enc_sign[3] = -1;
+            prefs.putInt("es0", -1);
+            prefs.putInt("es1", 1);
+            prefs.putInt("es2", 1);
+            prefs.putInt("es3", -1);
+            prefs.putInt("cfg_ver", 12);
+            Serial.println("[CFG] migrated to v12: enc_sign {-1,+1,+1,-1} (M0/M3 flip)");
         }
         prefs.end();
         return true;

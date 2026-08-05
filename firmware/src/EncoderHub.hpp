@@ -204,10 +204,24 @@ private:
                 enc_hz_[m] = 0.0f;
                 continue;
             }
-            angle_rad_[m] = ch_angle_[ch];
+            // Same polarity as rates: enc_sign (magnet) then motor_sign → logical
+            float ang = ch_angle_[ch];
+            if (cfg_.enc_sign[m] < 0) {
+                ang = -ang;
+            }
+            if (cfg_.motor_sign[m] < 0) {
+                ang = -ang;
+            }
+            constexpr float kTwoPi = 2.0f * static_cast<float>(M_PI);
+            while (ang < 0.0f) {
+                ang += kTwoPi;
+            }
+            while (ang >= kTwoPi) {
+                ang -= kTwoPi;
+            }
+            angle_rad_[m] = ang;
             if (rates) {
                 float hz = ch_hz[ch];
-                // Magnet/mount polarity, then DIR mirror → logical IK frame
                 if (cfg_.enc_sign[m] < 0) {
                     hz = -hz;
                 }

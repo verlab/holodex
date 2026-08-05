@@ -106,7 +106,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button id="stop">Stop</button>
       <button class="ok" id="resetOdom">Reset odom</button>
     </div>
-    <p class="hint" id="estopHint">Left = XY translate · Right X = yaw (mecanum, spin about center). Order: M0 FL · M1 RL · M2 FR · M3 RR (left motors flipped by default).</p>
+    <p class="hint" id="estopHint">Left=XY · Right X=yaw · M0 FL M1 RL M2 FR M3 RR</p>
   </section>
   <section class="card">
     <h2>Odometry</h2>
@@ -115,7 +115,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button type="button" data-view="enc">+ Encoders</button>
       <button type="button" data-view="full" class="active">+ IMU</button>
     </div>
-    <p class="hint" id="odomViewHint">Full: wheels+enc rates, yaw from IMU (+ Kalman). Compare all three below.</p>
+    <p class="hint" id="odomViewHint">Full = wheels+enc + IMU yaw. Table compares all three.</p>
     <div class="metrics">
       <div class="metric"><small>x (m)</small><b id="ox">0.000</b></div>
       <div class="metric"><small>y (m)</small><b id="oy">0.000</b></div>
@@ -161,7 +161,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 <main id="pane-motors">
   <section class="card" style="grid-column:1/-1">
     <h2>Individual motor test</h2>
-    <p class="hint">Idle motors are <b>disabled</b> (freewheel) so one wheel can spin alone. Teleop keeps all enabled.</p>
+    <p class="hint">Idle motors freewheel; teleop keeps all enabled.</p>
     <div id="motorSliders"></div>
     <div class="row"><label>Test %</label><input id="testScale" type="range" min="5" max="80" step="5" value="30"/><span class="val" id="testScaleVal">30%</span></div>
     <div class="btns">
@@ -172,7 +172,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button class="danger" id="testStop">Stop all</button>
     </div>
     <p class="hint" id="testDbg">cmd: —</p>
-    <p class="hint">Yaw IK: |Hz| equal with left/right signs. Pins: M0(FL) P19/D18/E17 · M1(RL) P27/D14/E13 · M2(FR) P23/D22/E32 · M3(RR) P33/D25/E26</p>
+    <p class="hint">Yaw: equal |Hz|, opposite L/R. Pins M0 P19/18/17 · M1 27/14/13 · M2 23/22/32 · M3 33/25/26</p>
   </section>
 </main>
 
@@ -192,13 +192,13 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>STA pass</label><input id="sta_password" type="password" placeholder="leave blank to keep"/></div>
       <div class="row"><label>Zenoh</label><input id="zenoh_endpoint" placeholder="tcp/192.168.1.100:7447"/></div>
       <div class="row"><label>r (m)</label><input id="wheel_radius_m" type="number" step="0.001"/></div>
-      <p class="hint">Wheel <b>radius</b> (diameter 10 cm → r = 0.05). Used for odometry with steps/rev.</p>
+      <p class="hint">Wheel radius (Ø10 cm → r=0.05) for odometry.</p>
       <div class="row"><label>lx (m)</label><input id="lx_m" type="number" step="0.001"/></div>
       <div class="row"><label>ly (m)</label><input id="ly_m" type="number" step="0.001"/></div>
       <div class="row"><label>steps/rev</label><input id="steps_per_rev" type="number" step="1"/></div>
       <div class="row"><label>Max step Hz</label><input id="max_step_hz" type="number" step="100"/></div>
       <div class="row"><label>Max accel</label><input id="max_accel_hz" type="number" step="100"/></div>
-      <p class="hint">Firmware ceiling at Max speed 100%. Effective Hz = slider% × this value (e.g. 35% of 12000 = 4200 Hz).</p>
+      <p class="hint">Ceiling at slider 100%. Effective Hz = % × max step Hz.</p>
       <div class="row"><label>Inv fwd</label><input id="invert_vx" type="checkbox"/></div>
       <div class="row"><label>Inv strafe</label><input id="invert_vy" type="checkbox"/></div>
       <div class="row"><label>Inv yaw</label><input id="invert_omega" type="checkbox"/></div>
@@ -212,7 +212,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       </div>
 
       <h2 style="margin-top:18px">Encoders · PCA9548A map</h2>
-      <p class="hint">Mux channel (0–7) per motor. Default: M0←0 · M1←1 · M2←4 · M3←5 (IMU on ch6). Flip enc if shaft sense is inverted vs IK.</p>
+      <p class="hint">Mux ch→motor: 0,1,4,5 (IMU ch6). Default Flip enc M0+M3.</p>
       <div class="row"><label>M0 FL ← ch</label><input id="ech0" type="number" min="0" max="7" step="1"/></div>
       <div class="row"><label>M1 RL ← ch</label><input id="ech1" type="number" min="0" max="7" step="1"/></div>
       <div class="row"><label>M2 FR ← ch</label><input id="ech2" type="number" min="0" max="7" step="1"/></div>
@@ -229,7 +229,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>Speed FB</label><input id="enc_speed_fb" type="checkbox"/></div>
       <div class="row"><label>Enc blend</label><input id="enc_blend" type="number" min="0" max="1" step="0.05"/></div>
       <div class="row"><label>Yaw Kalman</label><input id="yaw_kalman" type="checkbox"/></div>
-      <p class="hint">Enc odom: AS5600 rates (logical IK frame) blended with stepper. Speed FB: body-twist PI then re-IK (keeps spin about center). Yaw Kalman: gyro + wheel ω.</p>
+      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω.</p>
       <div class="btns"><button class="ok" type="submit">Save &amp; apply</button></div>
     </form>
 
@@ -256,9 +256,9 @@ const motorPct=[0,0,0,0];
 const maxSpeedEl=document.getElementById('maxSpeed');
 const maxSpeedVal=document.getElementById('maxSpeedVal');
 const odomHints={
-  wheels:'Pure: stepper command rates only, yaw from wheel FK (no encoders, no IMU).',
-  enc:'+ Encoders: AS5600 rates blended with steppers, yaw from wheel FK (no IMU).',
-  full:'+ IMU: wheels+enc rates, yaw from gyro (+ Kalman bias). Primary / Zenoh odom.'
+  wheels:'Pure: FAS rates, yaw from wheel FK.',
+  enc:'+Enc: AS5600 blend, yaw from wheel FK.',
+  full:'+IMU: blend rates, yaw from gyro/Kalman.'
 };
 document.querySelectorAll('#odomViewSeg button').forEach(btn=>{
   btn.onclick=()=>{
