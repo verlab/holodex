@@ -98,7 +98,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button id="stop">Stop</button>
       <button class="ok" id="resetOdom">Reset odom</button>
     </div>
-    <p class="hint" id="estopHint">Left = XY translate · Right X = yaw (mecanum, spin about center). Flip M0–3 / enc in Config if a wheel is mirrored.</p>
+    <p class="hint" id="estopHint">Left = XY translate · Right X = yaw (mecanum, spin about center). Order: M0 FL · M1 RL · M2 FR · M3 RR (left motors flipped by default).</p>
   </section>
   <section class="card">
     <h2>Odometry</h2>
@@ -131,7 +131,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="metric"><small>ay (m/s²)</small><b id="iay">—</b></div>
       <div class="metric"><small>az (m/s²)</small><b id="iaz">—</b></div>
     </div>
-    <p class="hint" id="imuHint">Mux ch4 · yaw fusion uses gz (rad/s internally)</p>
+    <p class="hint" id="imuHint">BMI160 on mux ch6 · yaw fusion uses gz (rad/s)</p>
   </section>
 </main>
 
@@ -149,7 +149,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button class="danger" id="testStop">Stop all</button>
     </div>
     <p class="hint" id="testDbg">cmd: —</p>
-    <p class="hint">Yaw IK: all four Hz equal. If M3 bar matches but wheel spins the wrong way, enable <b>Flip M3</b> in Config. Pins: M0 P19/D18/E17 · M1 P27/D14/E13 · M2 P23/D22/E32 · M3 P33/D25/E26</p>
+    <p class="hint">Yaw IK: |Hz| equal with left/right signs. Pins: M0(FL) P19/D18/E17 · M1(RL) P27/D14/E13 · M2(FR) P23/D22/E32 · M3(RR) P33/D25/E26</p>
   </section>
 </main>
 
@@ -179,21 +179,21 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>Inv fwd</label><input id="invert_vx" type="checkbox"/></div>
       <div class="row"><label>Inv strafe</label><input id="invert_vy" type="checkbox"/></div>
       <div class="row"><label>Inv yaw</label><input id="invert_omega" type="checkbox"/></div>
-      <div class="row"><label>Flip M0-3</label>
+      <div class="row"><label>Flip motors</label>
         <span>
-          <input id="ms0" type="checkbox"/>0
-          <input id="ms1" type="checkbox"/>1
-          <input id="ms2" type="checkbox"/>2
-          <input id="ms3" type="checkbox"/>3
+          <input id="ms0" type="checkbox"/>M0 FL
+          <input id="ms1" type="checkbox"/>M1 RL
+          <input id="ms2" type="checkbox"/>M2 FR
+          <input id="ms3" type="checkbox"/>M3 RR
         </span>
       </div>
 
       <h2 style="margin-top:18px">Encoders · PCA9548A map</h2>
-      <p class="hint">Which mux channel (AS5600) belongs to each motor. Flip if shaft sense is inverted vs IK.</p>
-      <div class="row"><label>M0 ← ch</label><input id="ech0" type="number" min="0" max="3" step="1"/></div>
-      <div class="row"><label>M1 ← ch</label><input id="ech1" type="number" min="0" max="3" step="1"/></div>
-      <div class="row"><label>M2 ← ch</label><input id="ech2" type="number" min="0" max="3" step="1"/></div>
-      <div class="row"><label>M3 ← ch</label><input id="ech3" type="number" min="0" max="3" step="1"/></div>
+      <p class="hint">Mux channel (0–7) per motor. Default: M0←0 · M1←1 · M2←4 · M3←5 (IMU on ch6). Flip enc if shaft sense is inverted vs IK.</p>
+      <div class="row"><label>M0 FL ← ch</label><input id="ech0" type="number" min="0" max="7" step="1"/></div>
+      <div class="row"><label>M1 RL ← ch</label><input id="ech1" type="number" min="0" max="7" step="1"/></div>
+      <div class="row"><label>M2 FR ← ch</label><input id="ech2" type="number" min="0" max="7" step="1"/></div>
+      <div class="row"><label>M3 RR ← ch</label><input id="ech3" type="number" min="0" max="7" step="1"/></div>
       <div class="row"><label>Flip enc</label>
         <span>
           <input id="es0" type="checkbox"/>0
@@ -273,18 +273,19 @@ const turnPad=bindPad(joyTurn, knobTurn, (x,y,active)=>{ yaw=x; turnActive=activ
 
 maxSpeedEl.oninput=()=>{ maxSpeedVal.textContent=maxSpeedEl.value+'%'; };
 
+const motorCorner=['FL','RL','FR','RR'];
 for(let i=0;i<4;i++){
   const d=document.createElement('div');
   d.className='metric';
-  d.innerHTML=`<small>M${i}</small><b id="w${i}">0</b><div class="bar"><i id="wb${i}"></i></div>`;
+  d.innerHTML=`<small>M${i} ${motorCorner[i]}</small><b id="w${i}">0</b><div class="bar"><i id="wb${i}"></i></div>`;
   wheels.appendChild(d);
   const e=document.createElement('div');
   e.className='metric';
-  e.innerHTML=`<small id="el${i}">M${i}←ch?</small><b id="ea${i}">—</b><small id="eh${i}" style="display:block;margin-top:2px">0 Hz</small><div class="bar"><i id="eb${i}"></i></div>`;
+  e.innerHTML=`<small id="el${i}">M${i} ${motorCorner[i]}←ch?</small><b id="ea${i}">—</b><small id="eh${i}" style="display:block;margin-top:2px">0 Hz</small><div class="bar"><i id="eb${i}"></i></div>`;
   encoders.appendChild(e);
   const row=document.createElement('div');
   row.className='motor-row';
-  row.innerHTML=`<div class="row"><label>M${i}</label><input id="msl${i}" type="range" min="-100" max="100" step="1" value="0"/><span class="val" id="msv${i}">0%</span></div>`;
+  row.innerHTML=`<div class="row"><label>M${i} ${motorCorner[i]}</label><input id="msl${i}" type="range" min="-100" max="100" step="1" value="0"/><span class="val" id="msv${i}">0%</span></div>`;
   motorSliders.appendChild(row);
   document.getElementById('msl'+i).addEventListener('input', (e)=>{
     motorPct[i]=+e.target.value;
@@ -307,15 +308,15 @@ document.querySelectorAll('.tab').forEach(btn=>{
 
 /**
  * Mecanum mix (matches firmware HolonomicKinematics).
- * Motor order: M0 FR, M1 RR, M2 FL, M3 RL.
+ * Motor order: M0 FL, M1 RL, M2 FR, M3 RR.
  * Stick-normalized: L=1 so full yaw matches full translate before peak scale.
- *   FR =  vx + vy + ω
- *   RR =  vx − vy + ω
  *   FL =  vx − vy − ω
  *   RL =  vx + vy − ω
+ *   FR =  vx + vy + ω
+ *   RR =  vx − vy + ω
  */
 function mecanumMix(vx, vy, w){
-  return [vx+vy+w, vx-vy+w, vx-vy-w, vx+vy-w];
+  return [vx-vy-w, vx+vy-w, vx+vy+w, vx-vy+w];
 }
 
 function motorsFromStick(sx, sy, rot, speedFrac){
@@ -367,20 +368,21 @@ function applyOdom(m){
   const encN=m.enc_n|0;
   encBadge.textContent=m.mux?(encN+'/4'+(m.enc_fresh?' live':' —')):(encN?'bus':'no mux');
   encBadge.className='badge '+(encN>0?'on':'off');
+  const encDef=[0,1,4,5];
   encHint.textContent=m.mux
-    ?`Mux ch0–3 · ${encN}/4 OK · odom uses encoder Hz when fresh, else stepper ramp`
+    ?`Mux 0,1,4,5 · ${encN}/4 OK · odom uses encoder Hz when fresh, else stepper ramp`
     :`No PCA9548A · encoders unavailable · odom uses stepper ramp`;
   for(let i=0;i<4;i++){
     const ok=m.enc_ok&&m.enc_ok[i];
-    const ch=(m.enc_ch&&m.enc_ch[i]!=null)?m.enc_ch[i]:i;
-    document.getElementById('el'+i).textContent=`M${i}←ch${ch}`;
+    const ch=(m.enc_ch&&m.enc_ch[i]!=null)?m.enc_ch[i]:encDef[i];
+    document.getElementById('el'+i).textContent=`M${i} ${motorCorner[i]}←ch${ch}`;
     const deg=(m.enc_deg&&m.enc_deg[i]!=null)?Number(m.enc_deg[i]):NaN;
     const ehz=(m.enc_hz&&m.enc_hz[i])||0;
     document.getElementById('ea'+i).textContent=ok&&!Number.isNaN(deg)?deg.toFixed(1)+'°':'—';
     document.getElementById('eh'+i).textContent=ok?Math.round(ehz)+' Hz':'no sensor';
     document.getElementById('eb'+i).style.width=ok?Math.min(100,(Math.abs(ehz)/Math.max(maxStepHz,1))*100)+'%':'0%';
   }
-  imuBadge.textContent=m.imu_ok?(m.mux?'mux ch4':'ok'):'down';
+  imuBadge.textContent=m.imu_ok?(m.mux?'mux ch6':'ok'):'down';
   imuBadge.className='badge '+(m.imu_ok?'on':'off');
   imuHint.textContent=m.imu_ok
     ?`gz ${Number(m.gz||0).toFixed(3)} rad/s · yaw fusion active`
@@ -411,7 +413,7 @@ function applyCfg(m){
   const ms=m.motor_sign||[1,1,1,1];
   motorSign=ms.map(v=>v<0?-1:1);
   ms0.checked=ms[0]<0; ms1.checked=ms[1]<0; ms2.checked=ms[2]<0; ms3.checked=ms[3]<0;
-  const ech=m.enc_ch||[0,1,2,3];
+  const ech=m.enc_ch||[0,1,4,5];
   ech0.value=ech[0]; ech1.value=ech[1]; ech2.value=ech[2]; ech3.value=ech[3];
   const es=m.enc_sign||[1,1,1,1];
   es0.checked=es[0]<0; es1.checked=es[1]<0; es2.checked=es[2]<0; es3.checked=es[3]<0;

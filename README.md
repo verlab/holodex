@@ -60,7 +60,7 @@ flowchart TB
   end
 
   subgraph Tick["Control @ 50 Hz"]
-    MUX["PCA9548A\nch0–3 AS5600 · ch4 IMU"]
+    MUX["PCA9548A\nch0,1,4,5 AS5600 · ch6 IMU"]
     SAMP["sample encoders + IMU"]
     MODE{"command mode"}
     IK["IK: v = vx ± vy ± L·ω\nL = lx + ly"]
@@ -148,15 +148,15 @@ Firmware **0.4.x** uses standard mecanum ([reference](https://github.com/Shimraz
 
 \[
 \begin{aligned}
-v_{FR} &= v_x + v_y + L\omega \\
-v_{RR} &= v_x - v_y + L\omega \\
 v_{FL} &= v_x - v_y - L\omega \\
-v_{RL} &= v_x + v_y - L\omega
+v_{RL} &= v_x + v_y - L\omega \\
+v_{FR} &= v_x + v_y + L\omega \\
+v_{RR} &= v_x - v_y + L\omega
 \end{aligned}
 \quad L = l_x + l_y
 \]
 
-Motor order: **M0=FR, M1=RR, M2=FL, M3=RL**.
+Motor order: **M0=FL, M1=RL, M2=FR, M3=RR**. Left motors use `motor_sign = −1` (DIR mirrored). Encoders: mux **ch0,1,4,5**; IMU: **ch6**.
 
 ## Repository layout
 

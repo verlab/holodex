@@ -7,23 +7,21 @@
 /**
  * Mecanum 4WD inverse / forward kinematics (body frame, spin about chassis center).
  *
- * Motor index / corner (HoloDex wiring):
- *   M0 front-right  (+lx, −ly)
- *   M1 rear-right   (−lx, −ly)
- *   M2 front-left   (+lx, +ly)
- *   M3 rear-left    (−lx, +ly)
+ * Motor index / corner (HoloDex physical wiring):
+ *   M0 front-left   (+lx, +ly)
+ *   M1 rear-left    (−lx, +ly)
+ *   M2 front-right  (+lx, −ly)
+ *   M3 rear-right   (−lx, −ly)
  *
  * Standard roller layout (ROS / OpenCR style), L = lx + ly:
- *   v_FR =  vx + vy + L·ω
- *   v_RR =  vx − vy + L·ω
  *   v_FL =  vx − vy − L·ω
  *   v_RL =  vx + vy − L·ω
+ *   v_FR =  vx + vy + L·ω
+ *   v_RR =  vx − vy + L·ω
  *
  * Wheel linear speeds (m/s) → step Hz via RobotConfig::mpsToStepHz.
- * motor_sign is applied in MotionController, not here.
- *
- * Replaces the older 45° omni û-model with swapped yaw/strafe columns, which
- * did not spin about the geometric center and broke yaw odometry.
+ * Left motors are mounted mirrored: motor_sign[M0]=motor_sign[M1]=−1
+ * (applied in MotionController, not here).
  */
 class HolonomicKinematics {
 public:
@@ -51,10 +49,10 @@ public:
 
         const float Lw = L_ * si.omega;
         const float v[4] = {
-            si.vx + si.vy + Lw,  // M0 FR
-            si.vx - si.vy + Lw,  // M1 RR
-            si.vx - si.vy - Lw,  // M2 FL
-            si.vx + si.vy - Lw,  // M3 RL
+            si.vx - si.vy - Lw,  // M0 FL
+            si.vx + si.vy - Lw,  // M1 RL
+            si.vx + si.vy + Lw,  // M2 FR
+            si.vx - si.vy + Lw,  // M3 RR
         };
         for (int i = 0; i < 4; ++i) {
             step_hz_out[i] = cfg_.mpsToStepHz(v[i]);
@@ -88,16 +86,18 @@ public:
      * Body twist from wheel step rates (SI). Exact left-inverse of inverseSi.
      */
     Twist2D forwardSi(const float step_hz[4]) const {
-        const float v0 = cfg_.stepHzToMps(step_hz[0]);  // FR
-        const float v1 = cfg_.stepHzToMps(step_hz[1]);  // RR
-        const float v2 = cfg_.stepHzToMps(step_hz[2]);  // FL
-        const float v3 = cfg_.stepHzToMps(step_hz[3]);  // RL
+        const float v0 = cfg_.stepHzToMps(step_hz[0]);  // FL
+        const float v1 = cfg_.stepHzToMps(step_hz[1]);  // RL
+        const float v2 = cfg_.stepHzToMps(step_hz[2]);  // FR
+        const float v3 = cfg_.stepHzToMps(step_hz[3]);  // RR
 
         Twist2D si;
         si.vx = 0.25f * (v0 + v1 + v2 + v3);
-        si.vy = 0.25f * (v0 - v1 - v2 + v3);
+        // Standard: vy = ¼(v_FR − v_RR − v_FL + v_RL)
+        si.vy = 0.25f * (v2 - v3 - v0 + v1);
         if (L_ > 1e-6f) {
-            si.omega = 0.25f * (v0 + v1 - v2 - v3) / L_;
+            // ω = ¼(v_FR + v_RR − v_FL − v_RL) / L
+            si.omega = 0.25f * (v2 + v3 - v0 - v1) / L_;
         } else {
             si.omega = 0.0f;
         }

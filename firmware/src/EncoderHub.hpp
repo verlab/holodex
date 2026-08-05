@@ -6,23 +6,51 @@
 #include <cmath>
 
 /**
- * 4× AS5600 on PCA9548A channels 0..3.
+ * Up to 4× AS5600 on PCA9548A (any of channels 0..7).
  *
  * Config maps mux channel → motor (enc_ch[Mi]) and shaft polarity (enc_sign).
  * Call sample() once per control tick; odometry/UI read motor-indexed cache.
+ *
+ * HoloDex wiring: AS5600 on mux ch0,1,4,5 → M0..M3; BMI160 on ch6 (do not probe).
  */
 class EncoderHub {
 public:
+    static constexpr int kMuxChannels = 8;
+
     EncoderHub(Pca9548a& mux, RobotConfig& cfg, TwoWire& wire = Wire)
         : mux_(mux),
           cfg_(cfg),
           wire_(wire),
-          enc_{As5600(wire), As5600(wire), As5600(wire), As5600(wire)} {}
+          enc_{As5600(wire), As5600(wire), As5600(wire), As5600(wire),
+               As5600(wire), As5600(wire), As5600(wire), As5600(wire)} {}
 
-    bool begin() {
+    /**
+     * @param also_scan_all if true, probe every mux channel 0..7 for AS5600;
+     *        if false (default), only probe channels listed in enc_ch[] so the
+     *        IMU channel is never disturbed.
+     */
+    bool begin(bool also_scan_all = false) {
         ch_ok_count_ = 0;
-        for (int ch = 0; ch < 4; ++ch) {
+        for (int ch = 0; ch < kMuxChannels; ++ch) {
             ch_ok_[ch] = false;
+            ch_angle_[ch] = NAN;
+        }
+
+        bool probe[kMuxChannels] = {};
+        if (also_scan_all) {
+            for (int ch = 0; ch < kMuxChannels; ++ch) {
+                probe[ch] = true;
+            }
+        } else {
+            for (int m = 0; m < 4; ++m) {
+                probe[RobotConfig::clampEncCh(cfg_.enc_ch[m])] = true;
+            }
+        }
+
+        for (int ch = 0; ch < kMuxChannels; ++ch) {
+            if (!probe[ch]) {
+                continue;
+            }
             if (!mux_.select(static_cast<uint8_t>(ch))) {
                 Serial.printf("[ENC] mux ch%u select failed\n", ch);
                 continue;
@@ -59,7 +87,9 @@ public:
         return n;
     }
     int channelsOk() const { return ch_ok_count_; }
-    bool channelOk(int ch) const { return ch >= 0 && ch < 4 && ch_ok_[ch]; }
+    bool channelOk(int ch) const {
+        return ch >= 0 && ch < kMuxChannels && ch_ok_[ch];
+    }
 
     /** True if motor Mi has a live AS5600 on its configured mux channel. */
     bool motorOk(int motor) const {
@@ -74,7 +104,7 @@ public:
     uint32_t lastSampleUs() const { return last_us_; }
 
     /**
-     * Read all mux channels that are mapped to at least one motor.
+     * Read mux channels mapped to motors.
      * Fills motor-indexed angle_rad_ / enc_hz_ (logical IK frame).
      */
     bool sample() {
@@ -83,8 +113,8 @@ public:
         if (dt < 1e-4f) {
             dt = 1e-4f;
         } else if (dt > 0.1f) {
-            for (int ch = 0; ch < 4; ++ch) {
-                if (!ch_ok_[ch]) {
+            for (int ch = 0; ch < kMuxChannels; ++ch) {
+                if (!ch_ok_[ch] || !channelMapped(ch)) {
                     continue;
                 }
                 if (!mux_.select(static_cast<uint8_t>(ch))) {
@@ -96,7 +126,7 @@ public:
                     enc_[ch].syncPrev();
                 }
             }
-            float z[4] = {};
+            float z[kMuxChannels] = {};
             publishMotorsFromChannels(z, /*rates=*/false);
             last_us_ = now;
             fresh_ = false;
@@ -105,13 +135,9 @@ public:
         last_us_ = now;
 
         bool any_ch = false;
-        float ch_hz[4] = {};
-        for (int ch = 0; ch < 4; ++ch) {
-            if (!ch_ok_[ch]) {
-                continue;
-            }
-            // Skip unused channels to save I2C time
-            if (!channelMapped(ch)) {
+        float ch_hz[kMuxChannels] = {};
+        for (int ch = 0; ch < kMuxChannels; ++ch) {
+            if (!ch_ok_[ch] || !channelMapped(ch)) {
                 continue;
             }
             if (!mux_.select(static_cast<uint8_t>(ch))) {
@@ -150,11 +176,11 @@ private:
     Pca9548a& mux_;
     RobotConfig& cfg_;
     TwoWire& wire_;
-    As5600 enc_[4];
-    bool ch_ok_[4] = {};
+    As5600 enc_[kMuxChannels];
+    bool ch_ok_[kMuxChannels] = {};
     int ch_ok_count_ = 0;
     bool fresh_ = false;
-    float ch_angle_[4] = {NAN, NAN, NAN, NAN};
+    float ch_angle_[kMuxChannels];
     float angle_rad_[4] = {NAN, NAN, NAN, NAN};
     float enc_hz_[4] = {};
     uint32_t last_us_ = 0;
@@ -168,7 +194,7 @@ private:
         return false;
     }
 
-    void publishMotorsFromChannels(const float ch_hz[4], bool rates) {
+    void publishMotorsFromChannels(const float ch_hz[kMuxChannels], bool rates) {
         for (int m = 0; m < 4; ++m) {
             const int ch = RobotConfig::clampEncCh(cfg_.enc_ch[m]);
             if (!ch_ok_[ch]) {

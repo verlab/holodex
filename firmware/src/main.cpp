@@ -23,9 +23,9 @@
 // I2C
 #define I2C_SDA 21
 #define I2C_SCL 5
-// PCA9548A: AS5600 on ch0..3, BMI160 on ch4 (same 0x36 / 0x69 addresses)
+// PCA9548A: AS5600 on ch0,1,4,5 (M0..M3); BMI160 on ch6
 #define MUX_I2C_ADDR 0x70
-#define MUX_CH_IMU 4
+#define MUX_CH_IMU 6
 
 // Built-in LED on DOIT ESP32 DevKit
 #define STATUS_LED_PIN 2
@@ -182,22 +182,24 @@ void setup() {
     bool mux_ok = false;
     if (g_mux->begin()) {
         mux_ok = true;
-        g_imu->attachMux(g_mux, MUX_CH_IMU);
         g_enc = new EncoderHub(*g_mux, g_cfg);
-        if (g_enc->begin()) {
+        // Probe only mapped encoder channels — never poke IMU mux ch6 as AS5600
+        if (g_enc->begin(/*also_scan_all=*/false)) {
             g_motion->attachEncoders(g_enc);
-            Serial.printf("[Boot] Encoders: %d/4 AS5600 on PCA9548A ch0-3\n", g_enc->okCount());
+            Serial.printf("[Boot] Encoders: %d/4 AS5600 (M←ch 0,1,4,5)\n", g_enc->okCount());
         } else {
             Serial.println("[Boot] Mux OK but no AS5600 — odom uses stepper speed");
         }
-        if (!g_imu->begin()) {
-            Serial.println("[IMU] Not on mux ch4 — retry on main bus");
+        g_mux->disableAll();
+        g_imu->attachMux(g_mux, MUX_CH_IMU);
+        if (g_imu->begin()) {
+            Serial.printf("[Boot] BMI160 on PCA9548A ch%u\n", MUX_CH_IMU);
+        } else {
+            Serial.printf("[IMU] Not on mux ch%u — retry on main bus\n", MUX_CH_IMU);
             g_imu->attachMux(nullptr, 0);
             if (!g_imu->begin()) {
                 Serial.println("[Boot] IMU optional — continuing without gyro fusion");
             }
-        } else {
-            Serial.println("[Boot] BMI160 on PCA9548A ch4");
         }
     } else {
         delete g_mux;
@@ -248,7 +250,7 @@ void loop() {
     }
 
     // Control / sensors / odom @ 50 Hz.
-    // One mux sweep per tick: AS5600 ch0..3 then BMI160 ch4 (no disableAll).
+    // One mux sweep per tick: mapped AS5600 channels then BMI160 (no disableAll).
     const uint32_t dt_ms = now - g_last_ctrl_ms;
     if (dt_ms >= 20) {
         const float dt_s = dt_ms * 0.001f;

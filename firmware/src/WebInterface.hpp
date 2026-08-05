@@ -78,7 +78,7 @@ public:
 
     void setZenohReady(bool ready) { zenoh_ready_ = ready; }
 
-    /** Optional sensors for /api/odom + WS telemetry (mux: enc ch0-3, IMU ch4). */
+    /** Optional sensors for /api/odom + WS telemetry (mux: enc 0,1,4,5 · IMU ch6). */
     void attachSensors(AccelGyroReader* imu, bool mux_ok) {
         imu_ = imu;
         mux_ok_ = mux_ok;

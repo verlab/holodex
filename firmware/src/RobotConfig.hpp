@@ -42,23 +42,25 @@ struct RobotConfig {
     bool invert_vx = false;
     bool invert_vy = false;
     bool invert_omega = false;
-    int8_t motor_sign[4] = {1, 1, 1, 1};  // set -1 to flip an individual wheel
+    // M0 FL, M1 RL face opposite DIR sense vs right side → default flip left
+    int8_t motor_sign[4] = {-1, -1, 1, 1};
 
     // AS5600 on PCA9548A: which mux channel feeds motor Mi, and shaft polarity
-    int8_t enc_ch[4] = {0, 1, 2, 3};   // mux ch 0..3 for M0..M3
+    // Physical wiring: M0←ch0, M1←ch1, M2←ch4, M3←ch5 (IMU on ch6)
+    int8_t enc_ch[4] = {0, 1, 4, 5};
     int8_t enc_sign[4] = {1, 1, 1, 1}; // -1 if magnet/mount is flipped vs IK
     bool enc_odom = true;              // prefer encoder rates for odometry
     bool enc_speed_fb = true;          // PI speed assist from encoder vs command
     float enc_blend = 0.85f;           // weight of encoder vs FAS when both exist
     bool yaw_kalman = true;            // fuse gyro + wheel omega for heading
 
-    /** Clamp encoder mux channel to 0..3. */
+    /** Clamp encoder mux channel to 0..7 (PCA9548A). */
     static int8_t clampEncCh(int v) {
         if (v < 0) {
             return 0;
         }
-        if (v > 3) {
-            return 3;
+        if (v > 7) {
+            return 7;
         }
         return static_cast<int8_t>(v);
     }
@@ -112,8 +114,10 @@ struct RobotConfig {
         yaw_kalman = prefs.getBool("yaw_kf", yaw_kalman);
 
         // v4: quieter teleop defaults
-        // v7: clear polarity experiments; yaw needs clean motor_sign=+1
-        // v8: encoder map / fusion defaults
+        // v7: clear polarity experiments
+        // v8: encoder map / fusion defaults (ch0..3)
+        // v9: physical motor order FL/RL/FR/RR, left motor_sign−1
+        // v10: encoder mux M0←0 M1←1 M2←4 M3←5 (IMU ch6)
         const int ver = prefs.getInt("cfg_ver", 0);
         if (ver < 4) {
             invert_vx = false;
@@ -164,6 +168,37 @@ struct RobotConfig {
             prefs.putFloat("enc_bl", 0.85f);
             prefs.putBool("yaw_kf", true);
             prefs.putInt("cfg_ver", 8);
+        }
+        if (prefs.getInt("cfg_ver", 0) < 9) {
+            // Match physical wiring: M0 FL, M1 RL, M2 FR, M3 RR; left DIR flipped
+            motor_sign[0] = -1;
+            motor_sign[1] = -1;
+            motor_sign[2] = 1;
+            motor_sign[3] = 1;
+            invert_vx = false;
+            invert_vy = false;
+            invert_omega = false;
+            prefs.putInt("ms0", -1);
+            prefs.putInt("ms1", -1);
+            prefs.putInt("ms2", 1);
+            prefs.putInt("ms3", 1);
+            prefs.putBool("inv_vx", false);
+            prefs.putBool("inv_vy", false);
+            prefs.putBool("inv_w", false);
+            prefs.putInt("cfg_ver", 9);
+            Serial.println("[CFG] migrated to v9: FL/RL/FR/RR + left flip");
+        }
+        if (prefs.getInt("cfg_ver", 0) < 10) {
+            enc_ch[0] = 0;
+            enc_ch[1] = 1;
+            enc_ch[2] = 4;
+            enc_ch[3] = 5;
+            prefs.putInt("ech0", 0);
+            prefs.putInt("ech1", 1);
+            prefs.putInt("ech2", 4);
+            prefs.putInt("ech3", 5);
+            prefs.putInt("cfg_ver", 10);
+            Serial.println("[CFG] migrated to v10: enc M←ch 0,1,4,5 (IMU ch6)");
         }
         prefs.end();
         return true;
