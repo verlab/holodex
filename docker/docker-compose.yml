@@ -1,4 +1,5 @@
 version: "3.8"
+
 services:
   zenoh:
     build: .
@@ -9,3 +10,30 @@ services:
       - "7447:7447/tcp"
       - "7447:7447/udp"
       - "8000:8000/tcp"
+    networks:
+      - holodex
+
+  # Paper / lab experiment: dual odometry capture (stepper vs encoder)
+  #   docker compose --profile experiment run --rm experiment
+  # Robot must be on STA with Zenoh endpoint tcp/<host-lan-ip>:7447
+  experiment:
+    profiles: ["experiment"]
+    image: python:3.11-slim
+    working_dir: /work
+    volumes:
+      - ../experiments:/work
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - zenoh
+    networks:
+      - holodex
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - >
+        pip install --no-cache-dir -q -r requirements.txt &&
+        python record_odom_compare.py --endpoint tcp/zenoh:7447
+
+networks:
+  holodex:
+    driver: bridge
