@@ -196,9 +196,12 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>lx (m)</label><input id="lx_m" type="number" step="0.001"/></div>
       <div class="row"><label>ly (m)</label><input id="ly_m" type="number" step="0.001"/></div>
       <div class="row"><label>steps/rev</label><input id="steps_per_rev" type="number" step="1"/></div>
+      <div class="row"><label>Max vx (m/s)</label><input id="max_vx" type="number" step="0.01"/></div>
+      <div class="row"><label>Max vy (m/s)</label><input id="max_vy" type="number" step="0.01"/></div>
+      <div class="row"><label>Max &omega; (rad/s)</label><input id="max_omega" type="number" step="0.05"/></div>
       <div class="row"><label>Max step Hz</label><input id="max_step_hz" type="number" step="100"/></div>
       <div class="row"><label>Max accel</label><input id="max_accel_hz" type="number" step="100"/></div>
-      <p class="hint">Ceiling at slider 100%. Effective Hz = % × max step Hz.</p>
+      <p class="hint">Slider 100% = max vx/vy/&omega;. Max step Hz is the hard wheel ceiling.</p>
       <div class="row"><label>Inv fwd</label><input id="invert_vx" type="checkbox"/></div>
       <div class="row"><label>Inv strafe</label><input id="invert_vy" type="checkbox"/></div>
       <div class="row"><label>Inv yaw</label><input id="invert_omega" type="checkbox"/></div>
@@ -245,7 +248,11 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
 <script>
 let activePane='drive', estopLocal=false, maxStepHz=12000, lastSentActive=false, ws;
 let mx=0, my=0, yaw=0;
+// 25 Hz teleop refresh; firmware holds each command for cmd_timeout_ms (600 ms)
+const TICK_MS=40;
+let lastPushMs=0, lastCmdN=null, lastCmdT=0, cmdRate=0, zeroBurst=0;
 let lxM=0.19, lyM=0.195;
+let maxVx=0.35, maxW=1.5;
 let motorSign=[1,1,1,1];
 let odomView='full';
 let lastOdomMsg=null;
@@ -307,12 +314,18 @@ function bindPad(pad, knob, onChange, axisMode){
 }
 
 let moveActive=false, turnActive=false;
-const movePad=bindPad(joyMove, knobMove, (x,y,active)=>{ mx=x; my=y; moveActive=active; if(!active) pushCmd(true); }, 'xy');
-const turnPad=bindPad(joyTurn, knobTurn, (x,y,active)=>{ yaw=x; turnActive=active; if(!active) pushCmd(true); }, 'x');
+// Send on stick motion too (throttled), so latency is not tied to the 40 ms tick
+const movePad=bindPad(joyMove, knobMove, (x,y,active)=>{ mx=x; my=y; moveActive=active; pushCmd(!active, active?TICK_MS:0); }, 'xy');
+const turnPad=bindPad(joyTurn, knobTurn, (x,y,active)=>{ yaw=x; turnActive=active; pushCmd(!active, active?TICK_MS:0); }, 'x');
+// Backgrounded tabs get their timers throttled to ~1 Hz — stop on purpose
+// instead of letting the firmware watchdog discover it.
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){ mx=0;my=0;yaw=0;moveActive=false;turnActive=false;movePad.reset();turnPad.reset(); }
+});
 
 maxSpeedEl.oninput=()=>{
-  const pct=+maxSpeedEl.value;
-  maxSpeedVal.textContent=pct+'% ('+Math.round(pct/100*maxStepHz)+' Hz)';
+  const f=(+maxSpeedEl.value)/100;
+  maxSpeedVal.textContent=(f*maxVx).toFixed(2)+' m/s · '+(f*maxW).toFixed(2)+' rad/s';
 };
 maxSpeedEl.oninput();
 
@@ -350,27 +363,15 @@ document.querySelectorAll('.tab').forEach(btn=>{
 });
 
 /**
- * Mecanum mix (matches firmware HolonomicKinematics).
+ * Mecanum mix for the per-motor test pane only. Teleop sends a body twist and
+ * lets the firmware run the SI kinematics (L = lx + ly), so web and Zenoh
+ * commands go through the exact same IK.
  * Motor order: M0 FL, M1 RL, M2 FR, M3 RR.
- * Stick-normalized: L=1 so full yaw matches full translate before peak scale.
- *   FL =  vx − vy − ω
- *   RL =  vx + vy − ω
- *   FR =  vx + vy + ω
- *   RR =  vx − vy + ω
  */
 function mecanumMix(vx, vy, w){
   return [vx-vy-w, vx+vy-w, vx+vy+w, vx-vy+w];
 }
 
-function motorsFromStick(sx, sy, rot, speedFrac){
-  if(estopLocal) return [0,0,0,0];
-  // sy=forward (vx), sx=strafe (vy), rot=yaw (ω)
-  let dirs=mecanumMix(sy, sx, rot);
-  const peak=Math.max(...dirs.map(v=>Math.abs(v)), 1e-9);
-  if(peak>1) dirs=dirs.map(v=>v/peak);
-  const hz=speedFrac*maxStepHz;
-  return dirs.map(v=>Math.round(v*hz));
-}
 function motorsFromTest(){
   if(estopLocal) return [0,0,0,0];
   const s=(+testScale.value)/100;
@@ -427,9 +428,12 @@ function applyOdom(m){
   sta.textContent=m.sta||'-'; zenoh.textContent=m.zenoh||'-';
   if(m.version) fwVer.textContent='fw '+m.version+(m.build?' ('+m.build+')':'');
   if(m.estop){ estopHint.textContent='E-STOP LATCHED — Clear E-Stop (LED double-blink)'; estopHint.style.color='var(--danger)'; }
-  else { estopHint.textContent='Left stick = translate. Right stick X = rotate. Max speed scales all wheel rates together.'; estopHint.style.color=''; }
+  else { estopHint.textContent='Left stick = translate. Right stick X = rotate. Max speed scales the body twist; IK runs on the robot.'; estopHint.style.color=''; }
   if(m.cmd_n!==undefined){
-    cmdDbg.textContent=`n=${m.cmd_n}  [${(m.wheels||[]).map(v=>Math.round(v)).join(' ')}]`;
+    const t=Date.now();
+    if(lastCmdN!==null && t>lastCmdT) cmdRate=Math.round((m.cmd_n-lastCmdN)*1000/(t-lastCmdT));
+    lastCmdN=m.cmd_n; lastCmdT=t;
+    cmdDbg.textContent=`${cmdRate} Hz  [${(m.wheels||[]).map(v=>Math.round(v)).join(' ')}]`;
   }
   for(let i=0;i<4;i++){
     const hz=(m.wheels&&m.wheels[i])||0;
@@ -480,6 +484,10 @@ function applyCfg(m){
   steps_per_rev.value=m.steps_per_rev;
   if(m.max_step_hz){ max_step_hz.value=m.max_step_hz; maxStepHz=+m.max_step_hz; }
   if(m.max_accel_hz) max_accel_hz.value=m.max_accel_hz;
+  if(m.max_vx){ max_vx.value=m.max_vx; maxVx=+m.max_vx; }
+  if(m.max_vy) max_vy.value=m.max_vy;
+  if(m.max_omega){ max_omega.value=m.max_omega; maxW=+m.max_omega; }
+  maxSpeedEl.oninput();
   if(m.lx_m) lxM=+m.lx_m; if(m.ly_m) lyM=+m.ly_m;
   invert_vx.checked=!!m.invert_vx; invert_vy.checked=!!m.invert_vy; invert_omega.checked=!!m.invert_omega;
   const ms=m.motor_sign||[1,1,1,1];
@@ -505,9 +513,8 @@ function connect(){
 }
 let httpInflight=false;
 function pushMotors(motors, testMode){
-  const msg=`M ${motors.join(' ')}${testMode?' [test]':''}`;
-  cmdDbg.textContent=msg;
-  if(testDbg) testDbg.textContent='cmd: '+msg;
+  lastPushMs=Date.now();
+  if(testDbg) testDbg.textContent=`cmd: M ${motors.join(' ')}${testMode?' [test]':''}`;
   if(ws&&ws.readyState===1){
     ws.send(JSON.stringify({type:'motors', test:!!testMode, m0:motors[0], m1:motors[1], m2:motors[2], m3:motors[3]}));
     return;
@@ -516,16 +523,38 @@ function pushMotors(motors, testMode){
   httpInflight=true;
   const t=testMode?'&test=1':'';
   fetch(`/api/cmd?m0=${motors[0]}&m1=${motors[1]}&m2=${motors[2]}&m3=${motors[3]}${t}&t=${Date.now()}`,{cache:'no-store'})
-    .then(r=>r.json()).then(applyOdom).catch(()=>{}).finally(()=>{httpInflight=false;});
+    .catch(()=>{}).finally(()=>{httpInflight=false;});
 }
-function pushCmd(forceStop){
+function pushTwist(vx, vy, w){
+  lastPushMs=Date.now();
+  if(ws&&ws.readyState===1){
+    ws.send(JSON.stringify({type:'cmd', vx:vx, vy:vy, omega:w}));
+    return;
+  }
+  if(httpInflight) return;
+  httpInflight=true;
+  fetch(`/api/cmd?vx=${vx}&vy=${vy}&omega=${w}&t=${Date.now()}`,{cache:'no-store'})
+    .catch(()=>{}).finally(()=>{httpInflight=false;});
+}
+function pushCmd(forceStop, minGap){
   if(activePane!=='drive') return;
-  const speedFrac=(+maxSpeedEl.value)/100;
-  const active=forceStop||moveActive||turnActive||Math.hypot(mx,my)>0.02||Math.abs(yaw)>0.02;
-  if(!active && !lastSentActive) return;
-  const motors=active?motorsFromStick(mx, my, yaw, speedFrac):[0,0,0,0];
-  lastSentActive=active && motors.some(v=>v!==0);
-  pushMotors(motors, false);
+  if(minGap && Date.now()-lastPushMs<minGap) return;
+  const s=estopLocal?0:(+maxSpeedEl.value)/100;
+  const live=moveActive||turnActive||Math.hypot(mx,my)>0.02||Math.abs(yaw)>0.02;
+  if(!live){
+    // Repeat the stop a few ticks: one dropped zero would otherwise leave the
+    // robot rolling until the firmware watchdog expires.
+    if(forceStop||lastSentActive) zeroBurst=5;
+    lastSentActive=false;
+    if(zeroBurst<=0) return;
+    zeroBurst--;
+    pushTwist(0, 0, 0);
+    return;
+  }
+  zeroBurst=0;
+  lastSentActive=true;
+  // Normalized body twist: left stick Y = vx, left stick X = vy, right stick X = ω
+  pushTwist(+(my*s).toFixed(3), +(mx*s).toFixed(3), +(yaw*s).toFixed(3));
 }
 function pushTest(force){
   if(activePane!=='motors') return;
@@ -563,6 +592,7 @@ cfgForm.onsubmit=async (e)=>{
   const body={
     sta_ssid:sta_ssid.value, sta_password:sta_password.value, zenoh_endpoint:zenoh_endpoint.value,
     wheel_radius_m:+wheel_radius_m.value, lx_m:+lx_m.value, ly_m:+ly_m.value, steps_per_rev:+steps_per_rev.value,
+    max_vx:+max_vx.value, max_vy:+max_vy.value, max_omega:+max_omega.value,
     max_step_hz:+max_step_hz.value, max_accel_hz:+max_accel_hz.value,
     invert_vx:invert_vx.checked, invert_vy:invert_vy.checked, invert_omega:invert_omega.checked,
     motor_sign:[ms0.checked?-1:1, ms1.checked?-1:1, ms2.checked?-1:1, ms3.checked?-1:1],
@@ -572,6 +602,7 @@ cfgForm.onsubmit=async (e)=>{
     enc_blend:+enc_blend.value, yaw_kalman:yaw_kalman.checked
   };
   maxStepHz=body.max_step_hz||maxStepHz;
+  maxVx=body.max_vx||maxVx; maxW=body.max_omega||maxW; maxSpeedEl.oninput();
   await fetch('/api/cfg',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(body)});
   if(ws&&ws.readyState===1) ws.send(JSON.stringify(Object.assign({type:'save_cfg'}, body)));
 };
@@ -588,7 +619,7 @@ otaForm.onsubmit=async (e)=>{
 };
 connect();
 fetch('/api/cfg').then(r=>r.json()).then(applyCfg).catch(()=>{});
-setInterval(()=>{ if(activePane==='drive') pushCmd(false); if(activePane==='motors') pushTest(false); }, 50);
+setInterval(()=>{ if(activePane==='drive') pushCmd(false, TICK_MS-5); if(activePane==='motors') pushTest(false); }, TICK_MS);
 setInterval(()=>{ if(ws&&ws.readyState===1) return; fetch('/api/odom',{cache:'no-store'}).then(r=>r.json()).then(applyOdom).catch(()=>{}); }, 250);
 </script>
 </body>

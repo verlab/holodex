@@ -284,7 +284,11 @@ void loop() {
         g_motion->update(dt_s, g_gyro_z, g_gyro_valid, now);
     }
 
-    if ((!g_zenoh || !g_zenoh->isReady()) && now - g_last_zenoh_try_ms > 8000) {
+    // z_open() blocks on the TCP handshake (seconds when the router is
+    // unreachable), which would stall teleop and trip the command watchdog.
+    // Only reconnect while the robot is standing still.
+    if ((!g_zenoh || !g_zenoh->isReady()) && now - g_last_zenoh_try_ms > 8000 &&
+        g_motion->activeSource() == CmdSource::None && !g_motion->driving()) {
         g_last_zenoh_try_ms = now;
         tryStartZenoh();
     }

@@ -54,6 +54,7 @@ public:
         web_cmd_.source = CmdSource::Web;
         web_cmd_.stamp_ms = now_ms;
         mode_ = Mode::Cinematic;
+        holding_ = false;
 
         float hz[4] = {};
         kin_.inverseNormalized(web_cmd_.twist, hz);
@@ -77,6 +78,7 @@ public:
         zenoh_cmd_.source = CmdSource::Zenoh;
         zenoh_cmd_.stamp_ms = now_ms;
         mode_ = Mode::Cinematic;
+        holding_ = false;
 
         float hz[4] = {};
         kin_.inverseSi(si, hz);
@@ -141,6 +143,7 @@ public:
         raw_stamp_ms_ = now_ms;
         raw_test_mode_ = test_mode;
         mode_ = Mode::RawMotors;
+        holding_ = false;
         web_cmd_.source = CmdSource::Web;
         web_cmd_.stamp_ms = now_ms;
 
@@ -155,6 +158,7 @@ public:
         web_cmd_ = {};
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
+        holding_ = false;
         web_cmd_.stamp_ms = now_ms;
         for (int i = 0; i < 4; ++i) {
             if (motors_[i]) {
@@ -174,6 +178,7 @@ public:
         web_cmd_ = {};
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
+        holding_ = false;
         resetSpeedIntegrators();
         Serial.println("[ESTOP] cleared");
     }
@@ -210,35 +215,37 @@ public:
             mode_ == Mode::RawMotors && (now_ms - raw_stamp_ms_) <= cfg_.cmd_timeout_ms;
 
         bool freewheel = false;
+        bool coasting = false;
         if (mode_ == Mode::MoveTo) {
+            holding_ = false;
             if (!serviceMoveTo(cmd_hz)) {
                 mode_ = Mode::Idle;
                 active_source_ = CmdSource::None;
             } else {
                 active_source_ = CmdSource::Web;
             }
-        } else if (web_fresh && mode_ == Mode::RawMotors && raw_fresh) {
+        } else if (mode_ == Mode::RawMotors && raw_fresh) {
+            holding_ = false;
             for (int i = 0; i < 4; ++i) {
                 cmd_hz[i] = raw_hz_[i];
             }
             active_source_ = CmdSource::Web;
             freewheel = raw_test_mode_;
         } else if (web_fresh && mode_ == Mode::Cinematic) {
+            holding_ = false;
             kin_.inverseNormalized(web_cmd_.twist, cmd_hz);
             active_source_ = CmdSource::Web;
         } else if (zenoh_fresh) {
+            holding_ = false;
             kin_.inverseSi(zenoh_si_, cmd_hz);
             active_source_ = CmdSource::Zenoh;
         } else {
-            // Timeout → stop + re-hold (exit freewheel test)
-            active_source_ = CmdSource::None;
-            mode_ = Mode::Idle;
-            raw_test_mode_ = false;
-            resetSpeedIntegrators();
+            coasting = serviceCommandTimeout(cmd_hz, now_ms);
         }
 
-        // Body-level speed assist (preserves mecanum coupling / ICR at center)
-        if (!freewheel && cfg_.enc_speed_fb && enc_ && enc_->fresh() &&
+        // Body-level speed assist (preserves mecanum coupling / ICR at center).
+        // Skipped while coasting: the assist would fight the ramp-down.
+        if (!freewheel && !coasting && cfg_.enc_speed_fb && enc_ && enc_->fresh() &&
             active_source_ != CmdSource::None) {
             applySpeedFeedback(cmd_hz, dt_s);
         } else if (active_source_ == CmdSource::None) {
@@ -271,6 +278,12 @@ private:
     float applied_hz_[4] = {};
     float raw_hz_[4] = {};
     uint32_t raw_stamp_ms_ = 0;
+    // Watchdog coast-down: hold the last command and fade it out
+    static constexpr uint32_t kCoastMs = 250;
+    bool holding_ = false;
+    uint32_t hold_start_ms_ = 0;
+    float hold_hz_[4] = {};
+    bool last_freewheel_ = false;
     float move_tx_ = 0.0f;
     float move_ty_ = 0.0f;
     float move_speed_ = 0.2f;
@@ -290,6 +303,45 @@ private:
         speed_i_vx_ = 0.0f;
         speed_i_vy_ = 0.0f;
         speed_i_w_ = 0.0f;
+    }
+
+    /**
+     * Command watchdog. A stale command coasts to zero over kCoastMs instead of
+     * dropping there on the first late tick, so one lost packet (or one loop
+     * iteration blocked by the HTTP server) costs a small dip rather than a full
+     * decelerate/re-accelerate cycle. A real link loss still stops the robot.
+     * @return true while coasting, so the speed assist stays out of the way.
+     */
+    bool serviceCommandTimeout(float cmd_hz[4], uint32_t now_ms) {
+        if (!holding_) {
+            if (active_source_ == CmdSource::None) {
+                mode_ = Mode::Idle;
+                raw_test_mode_ = false;
+                resetSpeedIntegrators();
+                return false;
+            }
+            holding_ = true;
+            hold_start_ms_ = now_ms;
+            for (int i = 0; i < 4; ++i) {
+                hold_hz_[i] = applied_hz_[i];
+            }
+        }
+
+        const uint32_t held = now_ms - hold_start_ms_;
+        if (held < kCoastMs) {
+            const float k = 1.0f - static_cast<float>(held) / static_cast<float>(kCoastMs);
+            for (int i = 0; i < 4; ++i) {
+                cmd_hz[i] = hold_hz_[i] * k;
+            }
+            return true;
+        }
+
+        holding_ = false;
+        active_source_ = CmdSource::None;
+        mode_ = Mode::Idle;
+        raw_test_mode_ = false;
+        resetSpeedIntegrators();
+        return false;
     }
 
     /**
@@ -484,8 +536,17 @@ private:
             }
         }
 
+        // Re-issuing an unchanged setpoint costs a critical section per motor in
+        // FastAccelStepper for nothing. Teleop refreshes at ~25 Hz on top of the
+        // 50 Hz control tick, so most calls are no-ops — skip them.
+        const bool mode_changed = freewheel_idle != last_freewheel_;
+        last_freewheel_ = freewheel_idle;
+
         for (int i = 0; i < 4; ++i) {
             if (!motors_[i]) {
+                continue;
+            }
+            if (!mode_changed && deltas[i] == 0) {
                 continue;
             }
             // Proportional accel so wheels arrive together (original main.cpp).

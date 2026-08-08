@@ -63,6 +63,10 @@ public:
     }
 
     void loop() {
+        // WebServer::handleClient() blocks while a slow client dribbles in its
+        // request, so drain the teleop socket both before and after it. Otherwise
+        // a stalled HTTP request delays inbound commands past the watchdog.
+        ws_.loop();
         http_.handleClient();
         ws_.loop();
 
@@ -70,7 +74,9 @@ public:
         const uint32_t now = millis();
         if (now - last_broadcast_ms_ >= 100) {
             last_broadcast_ms_ = now;
-            broadcastOdom();
+            if (ws_.connectedClients() > 0) {
+                broadcastOdom();
+            }
         }
     }
 
@@ -142,20 +148,22 @@ private:
     }
 
     void handleCmdGet() {
-        // Preferred: raw motor Hz (same payload the Qt app sent over Zenoh)
+        // Commands answer with a short ack, not the full odom document: on SoftAP
+        // the serialize+send dominated the round trip and throttled the HTTP
+        // fallback command rate. Telemetry comes from the WS push / /api/odom.
         if (http_.hasArg("m0") || http_.hasArg("m1") || http_.hasArg("m2") ||
             http_.hasArg("m3")) {
             const bool test = http_.hasArg("test") && http_.arg("test").toInt() != 0;
             acceptMotors(http_.arg("m0").toFloat(), http_.arg("m1").toFloat(),
                          http_.arg("m2").toFloat(), http_.arg("m3").toFloat(), test);
-            sendOdom();
+            sendAck();
             return;
         }
         // Fallback: cinematic stick (dir_x, dir_y, omega) == getDirection args
         acceptStick(http_.hasArg("vx") ? http_.arg("vx").toFloat() : 0.0f,
                     http_.hasArg("vy") ? http_.arg("vy").toFloat() : 0.0f,
                     http_.hasArg("omega") ? http_.arg("omega").toFloat() : 0.0f);
-        sendOdom();
+        sendAck();
     }
 
     void handleCmdPost() {
@@ -176,7 +184,7 @@ private:
                     } else {
                         acceptStick(doc["vx"] | 0.0f, doc["vy"] | 0.0f, doc["omega"] | 0.0f);
                     }
-                    sendOdom();
+                    sendAck();
                     return;
                 }
             }
@@ -259,6 +267,11 @@ private:
         String out;
         serializeJson(makeOdomDoc(), out);
         http_.send(200, "application/json", out);
+    }
+
+    void sendAck() {
+        cors();
+        http_.send(200, "application/json", "{\"ok\":1}");
     }
 
     void sendCfg() {
