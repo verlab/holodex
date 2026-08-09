@@ -63,6 +63,12 @@ static ZenohStateManager* g_zenoh = nullptr;
 static StatusLed g_led(STATUS_LED_PIN);
 static OtaService g_ota;
 
+// Vars used for async zenoh logging
+static OdometryState g_state_main;
+static OdometryState g_state_step;
+static OdometryState g_state_enc;
+static SemaphoreHandle_t g_odom_mutex = nullptr;
+
 static uint32_t g_last_ctrl_ms = 0;
 static uint32_t g_last_zenoh_odom_ms = 0;
 static uint32_t g_last_zenoh_try_ms = 0;
@@ -92,15 +98,19 @@ static void onZenohMotors(const MotorDTO& m, void* /*ctx*/) {
 }
 
 static void tryStartZenoh() {
+    Serial.println("[Zenoh] Trying connection");
     if (!g_cfg.zenoh_enabled || g_cfg.zenoh_endpoint[0] == '\0') {
         return;
     }
+    /* Bug: wifi retorna status de wifi não inicializado, embora esteja okay
     if (!g_wifi || !g_wifi->staConnected()) {
         return;
     }
+    */
     if (g_zenoh && g_zenoh->isReady()) {
         return;
     }
+    
 
     if (g_zenoh) {
         delete g_zenoh;
@@ -108,18 +118,60 @@ static void tryStartZenoh() {
     }
 
     Serial.println("[Zenoh] Starting bridge...");
-    g_zenoh = new ZenohStateManager(g_cfg.zenoh_endpoint);
-    if (!g_zenoh->isReady()) {
-        delete g_zenoh;
-        g_zenoh = nullptr;
-        Serial.println("[Zenoh] Not ready — will retry");
-    } else {
-        g_zenoh->setCommandCallback(onZenohCmd, nullptr);
-        g_zenoh->setMotorCallback(onZenohMotors, nullptr);
-    }
 
-    if (g_web) {
-        g_web->setZenohReady(g_zenoh && g_zenoh->isReady());
+    xTaskCreate(
+        [](void *pvParameters) {
+            Serial.println("[Zenoh] Initializing task.");
+            g_zenoh = new ZenohStateManager(g_cfg.zenoh_endpoint);
+
+            if (!g_zenoh->isReady()) {
+                delete g_zenoh;
+                g_zenoh = nullptr;
+                Serial.println("[Zenoh] Not ready — will retry");
+            } else {
+                g_zenoh->setCommandCallback(onZenohCmd, nullptr);
+                g_zenoh->setMotorCallback(onZenohMotors, nullptr);
+            }
+
+            if (g_web) {
+                g_web->setZenohReady(g_zenoh && g_zenoh->isReady());
+            }
+            
+            Serial.println("[Zenoh] Task init is done.");
+            vTaskDelete(NULL); 
+        },
+        "ZenohInitTask",
+        16384,
+        NULL,
+        1,
+        NULL
+    );
+}
+void ZenohTelemetryTask(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(50); // Mantém seus 20Hz
+
+    while(true) {
+        // Aguarda estritamente 50ms independentemente do tempo de envio
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+        if (g_zenoh && g_zenoh->isReady()) {
+            OdometryState local_main, local_step, local_enc;
+            
+            // Faz uma cópia rápida (atômica) dos estados usando o Mutex
+            if (xSemaphoreTake(g_odom_mutex, portMAX_DELAY) == pdTRUE) {
+                local_main = g_state_main;
+                local_step = g_state_step;
+                local_enc = g_state_enc;
+                xSemaphoreGive(g_odom_mutex);
+            }
+
+            // Se o Wi-Fi engasgar e essa chamada bloquear, o loop principal
+            // do seu robô NÃO será afetado!
+            g_zenoh->publishOdometry(local_main);
+            g_zenoh->publishOdometryWheels(local_step);
+            g_zenoh->publishOdometryWheelsEnc(local_enc);
+        }
     }
 }
 
@@ -215,6 +267,17 @@ void setup() {
     Serial.println("[Boot] LED: slow=idle  fast=driving  double=ESTOP  flicker=OTA");
     Serial.println("[Boot] http://192.168.4.1/  OTA password=holodex");
     Serial.println("[Boot] Move: GET /api/move?dx=0.3&dy=0&v=0.2");
+
+    Serial.println("[BOOT] Starting zenoh telemetry task");
+    g_odom_mutex = xSemaphoreCreateMutex();
+    xTaskCreate(
+        ZenohTelemetryTask, 
+        "ZenohTelemetry", 
+        8192,  // Tamanho razoável de stack para manipulação JSON/Rede
+        NULL, 
+        1,     // Prioridade baixa (o controle dos motores deve ser sempre prioridade)
+        NULL
+    );
 }
 
 void loop() {
@@ -287,17 +350,18 @@ void loop() {
     // z_open() blocks on the TCP handshake (seconds when the router is
     // unreachable), which would stall teleop and trip the command watchdog.
     // Only reconnect while the robot is standing still.
-    if ((!g_zenoh || !g_zenoh->isReady()) && now - g_last_zenoh_try_ms > 8000 &&
+    if ((!g_zenoh || (g_zenoh && !g_zenoh->isReady())) && now - g_last_zenoh_try_ms > 8000 &&
         g_motion->activeSource() == CmdSource::None && !g_motion->driving()) {
         g_last_zenoh_try_ms = now;
         tryStartZenoh();
     }
 
-    if (g_zenoh && g_zenoh->isReady() && now - g_last_zenoh_odom_ms >= 50) {
-        g_last_zenoh_odom_ms = now;
-        // Always publish the three comparable streams
-        g_zenoh->publishOdometry(g_odom->state());                 // wheels+enc+imu
-        g_zenoh->publishOdometryWheels(g_odom_step->state());      // wheels
-        g_zenoh->publishOdometryWheelsEnc(g_odom_enc->state());    // wheels+enc
+    if (g_odom_mutex && dt_ms >= 20) { 
+        if (xSemaphoreTake(g_odom_mutex, 0) == pdTRUE) {
+            g_state_main = g_odom->state();
+            g_state_step = g_odom_step->state();
+            g_state_enc  = g_odom_enc->state();
+            xSemaphoreGive(g_odom_mutex);
+        }
     }
 }
