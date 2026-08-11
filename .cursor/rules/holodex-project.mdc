@@ -41,6 +41,7 @@ Zenoh holodex/cmd_vel ─┘         │
 ## Contribution
 
 - Branch from `dev`; PRs → `dev` → `main`. Conventional Commits.
+- Commit, push and tag firmware changes without asking — bump `FirmwareVersion.hpp` and tag `vX.Y.Z` to match.
 - Details: `CONTRIBUTING.md`.
 
 ## When editing
