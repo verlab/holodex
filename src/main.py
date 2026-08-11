@@ -11,7 +11,7 @@ from vector_input import Vetor2DWidget
 from cinematic import Cinematics
 
 
-MAX_SPEED = 25000
+MAX_SPEED = 12000
 
 class MainWindow(QMainWindow):    
     def __init__(self):
@@ -73,10 +73,10 @@ class MainWindow(QMainWindow):
 
         # Cinematic calculator
         self.cinCalc = Cinematics()
-        self.cinCalc.addMotor(-1,-1, 23.5,-14.7)
-        self.cinCalc.addMotor(-1, 1,-23.5,-14.7)
-        self.cinCalc.addMotor( 1,-1, 23.5, 14.7)
         self.cinCalc.addMotor( 1, 1,-23.5, 14.7)
+        self.cinCalc.addMotor(-1, 1,-23.5,-14.7)
+        self.cinCalc.addMotor(-1, 1, 23.5, 14.7)
+        self.cinCalc.addMotor( 1, 1, 23.5,-14.7)
         
         self.control_rotation = 0.0
         
@@ -105,7 +105,14 @@ class MainWindow(QMainWindow):
     def on_joy_event(self, x, y, rot):
         print(x, y, rot)
         self.control_rotation = rot
-        self.vector_input.set_value(x, -y)
+        if(x < 0.1 and y < 0.1 and x > -0.1 and y > -0.1):
+            x = 0
+            y = 0
+        if (rot < 0.3 and rot > -0.3):
+            rot = 0
+           
+        self.control_rotation = rot
+        self.vector_input.set_value(0, -y)
 
     # Vector system callback function
     def vector_onChange(self, x, y):

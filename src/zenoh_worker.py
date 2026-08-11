@@ -3,6 +3,8 @@ import time
 import struct
 from PySide6.QtCore import Slot, Qt, QObject, Signal, QThread
 
+lastTime = 0
+
 class ZenohWorker(QObject):
     # QT signals
     data_received = Signal(str)
@@ -50,6 +52,10 @@ class ZenohWorker(QObject):
     @Slot(int, int, int, int)
     def publish_slider_values(self, val1, val2, val3, val4):
         """Sends 4 signed 32 bit integers to Zenoh"""
+        global lastTime
+        if time.time() < lastTime+0.1:
+            return
+        lastTime = time.time()
         print("Trying to publish")
         if self.session:
             key_expr = "demo/pc_to_esp"

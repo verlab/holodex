@@ -19,7 +19,7 @@ class Cinematics:
     
     def getDirection(self, direction_x : float, direction_y : float, rotation : float) -> list[float]:
         l = []
-        vec = np.array([direction_x, direction_y])
+        vec = np.array([-direction_y, direction_x])
 
         # Iteramos pelas direções e posições de cada motor ao mesmo tempo
         for m_dir, m_pos in zip(self.motorsDir, self.motorsPos):
