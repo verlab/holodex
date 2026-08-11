@@ -63,15 +63,15 @@ static ZenohStateManager* g_zenoh = nullptr;
 static StatusLed g_led(STATUS_LED_PIN);
 static OtaService g_ota;
 
-// Vars used for async zenoh logging
+// Odometry snapshot handed to ZenohTask (owner: main loop, reader: ZenohTask)
 static OdometryState g_state_main;
 static OdometryState g_state_step;
 static OdometryState g_state_enc;
 static SemaphoreHandle_t g_odom_mutex = nullptr;
+static volatile bool g_zenoh_ready = false;
+static volatile bool g_zenoh_restart_req = false;
 
 static uint32_t g_last_ctrl_ms = 0;
-static uint32_t g_last_zenoh_odom_ms = 0;
-static uint32_t g_last_zenoh_try_ms = 0;
 static float g_gyro_z = NAN;
 static bool g_gyro_valid = false;
 static uint32_t g_gyro_stamp_ms = 0;
@@ -83,95 +83,127 @@ static void onOtaBusy(bool busy, void* /*ctx*/) {
     }
 }
 
+// Zenoh subscriber callbacks run on the zenoh-pico read task. Driving
+// MotionController from there races the control loop and reaches
+// FastAccelStepper from two threads at once, so commands are parked in this
+// slot and applied by loop(). Only the newest one matters.
+static portMUX_TYPE g_zcmd_mux = portMUX_INITIALIZER_UNLOCKED;
+static Twist2D g_zcmd_twist{};
+static MotorDTO g_zcmd_motors{};
+static bool g_zcmd_twist_pending = false;
+static bool g_zcmd_motors_pending = false;
+
 static void onZenohCmd(const Twist2D& twist, void* /*ctx*/) {
-    if (g_motion) {
-        g_motion->setZenohCommand(twist, millis());
-    }
+    portENTER_CRITICAL(&g_zcmd_mux);
+    g_zcmd_twist = twist;
+    g_zcmd_twist_pending = true;
+    portEXIT_CRITICAL(&g_zcmd_mux);
 }
 
 static void onZenohMotors(const MotorDTO& m, void* /*ctx*/) {
-    if (g_motion) {
-        g_motion->setRawMotorHz(static_cast<float>(m.motorA), static_cast<float>(m.motorB),
-                                static_cast<float>(m.motorC), static_cast<float>(m.motorD),
-                                millis());
+    portENTER_CRITICAL(&g_zcmd_mux);
+    g_zcmd_motors = m;
+    g_zcmd_motors_pending = true;
+    portEXIT_CRITICAL(&g_zcmd_mux);
+}
+
+static void drainZenohCommands(uint32_t now) {
+    Twist2D twist{};
+    MotorDTO motors{};
+    bool have_twist = false;
+    bool have_motors = false;
+
+    portENTER_CRITICAL(&g_zcmd_mux);
+    if (g_zcmd_twist_pending) {
+        twist = g_zcmd_twist;
+        g_zcmd_twist_pending = false;
+        have_twist = true;
+    }
+    if (g_zcmd_motors_pending) {
+        motors = g_zcmd_motors;
+        g_zcmd_motors_pending = false;
+        have_motors = true;
+    }
+    portEXIT_CRITICAL(&g_zcmd_mux);
+
+    if (!g_motion) {
+        return;
+    }
+    if (have_motors) {
+        g_motion->setRawMotorHz(static_cast<float>(motors.motorA),
+                                static_cast<float>(motors.motorB),
+                                static_cast<float>(motors.motorC),
+                                static_cast<float>(motors.motorD), now);
+    } else if (have_twist) {
+        g_motion->setZenohCommand(twist, now);
     }
 }
 
-static void tryStartZenoh() {
-    Serial.println("[Zenoh] Trying connection");
-    if (!g_cfg.zenoh_enabled || g_cfg.zenoh_endpoint[0] == '\0') {
-        return;
-    }
-    /* Bug: wifi retorna status de wifi não inicializado, embora esteja okay
-    if (!g_wifi || !g_wifi->staConnected()) {
-        return;
-    }
-    */
-    if (g_zenoh && g_zenoh->isReady()) {
-        return;
-    }
-    
+/**
+ * Sole owner of g_zenoh: session open, publishing and teardown all happen here.
+ * The blocking calls stay off the Arduino loop (z_open against an unreachable
+ * router costs seconds) and no other thread can free the session while a
+ * publish is in flight.
+ */
+static void ZenohTask(void* /*param*/) {
+    uint32_t last_pub_ms = 0;
+    uint32_t last_try_ms = 0;
 
-    if (g_zenoh) {
-        delete g_zenoh;
-        g_zenoh = nullptr;
-    }
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        const uint32_t now = millis();
 
-    Serial.println("[Zenoh] Starting bridge...");
-
-    xTaskCreate(
-        [](void *pvParameters) {
-            Serial.println("[Zenoh] Initializing task.");
-            g_zenoh = new ZenohStateManager(g_cfg.zenoh_endpoint);
-
-            if (!g_zenoh->isReady()) {
-                delete g_zenoh;
-                g_zenoh = nullptr;
-                Serial.println("[Zenoh] Not ready — will retry");
-            } else {
-                g_zenoh->setCommandCallback(onZenohCmd, nullptr);
-                g_zenoh->setMotorCallback(onZenohMotors, nullptr);
-            }
-
-            if (g_web) {
-                g_web->setZenohReady(g_zenoh && g_zenoh->isReady());
-            }
-            
-            Serial.println("[Zenoh] Task init is done.");
-            vTaskDelete(NULL); 
-        },
-        "ZenohInitTask",
-        16384,
-        NULL,
-        1,
-        NULL
-    );
-}
-void ZenohTelemetryTask(void *pvParameters) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(50); // Mantém seus 20Hz
-
-    while(true) {
-        // Aguarda estritamente 50ms independentemente do tempo de envio
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
-
-        if (g_zenoh && g_zenoh->isReady()) {
-            OdometryState local_main, local_step, local_enc;
-            
-            // Faz uma cópia rápida (atômica) dos estados usando o Mutex
-            if (xSemaphoreTake(g_odom_mutex, portMAX_DELAY) == pdTRUE) {
-                local_main = g_state_main;
-                local_step = g_state_step;
-                local_enc = g_state_enc;
-                xSemaphoreGive(g_odom_mutex);
-            }
-
-            // Se o Wi-Fi engasgar e essa chamada bloquear, o loop principal
-            // do seu robô NÃO será afetado!
-            g_zenoh->publishOdometry(local_main);
-            g_zenoh->publishOdometryWheels(local_step);
-            g_zenoh->publishOdometryWheelsEnc(local_enc);
+        if (g_zenoh_restart_req) {
+            g_zenoh_restart_req = false;
+            delete g_zenoh;
+            g_zenoh = nullptr;
+            g_zenoh_ready = false;
         }
+
+        if (!g_zenoh) {
+            if (!g_cfg.zenoh_enabled || g_cfg.zenoh_endpoint[0] == '\0') {
+                continue;
+            }
+            if (!g_wifi || !g_wifi->staConnected()) {
+                continue;
+            }
+            if (now - last_try_ms < 8000) {
+                continue;
+            }
+            last_try_ms = now;
+
+            auto* z = new ZenohStateManager(g_cfg.zenoh_endpoint);
+            if (!z->isReady()) {
+                delete z;
+                Serial.println("[Zenoh] Not ready — will retry");
+                continue;
+            }
+            z->setCommandCallback(onZenohCmd, nullptr);
+            z->setMotorCallback(onZenohMotors, nullptr);
+            g_zenoh = z;
+            g_zenoh_ready = true;
+            continue;
+        }
+
+        if (now - last_pub_ms < 50) {
+            continue;
+        }
+        last_pub_ms = now;
+
+        OdometryState local_main;
+        OdometryState local_step;
+        OdometryState local_enc;
+        if (!g_odom_mutex || xSemaphoreTake(g_odom_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+            continue;
+        }
+        local_main = g_state_main;
+        local_step = g_state_step;
+        local_enc = g_state_enc;
+        xSemaphoreGive(g_odom_mutex);
+
+        g_zenoh->publishOdometry(local_main);
+        g_zenoh->publishOdometryWheels(local_step);
+        g_zenoh->publishOdometryWheelsEnc(local_enc);
     }
 }
 
@@ -182,10 +214,9 @@ static void onConfigChanged(void* /*ctx*/) {
     if (g_enc) {
         g_enc->logMap();
     }
-    if (g_zenoh) {
-        delete g_zenoh;
-        g_zenoh = nullptr;
-    }
+    // Teardown is ZenohTask's job — freeing the session from the web handler
+    // would pull it out from under an in-flight publish.
+    g_zenoh_restart_req = true;
     if (g_web) {
         g_web->setZenohReady(false);
     }
@@ -268,16 +299,11 @@ void setup() {
     Serial.println("[Boot] http://192.168.4.1/  OTA password=holodex");
     Serial.println("[Boot] Move: GET /api/move?dx=0.3&dy=0&v=0.2");
 
-    Serial.println("[BOOT] Starting zenoh telemetry task");
     g_odom_mutex = xSemaphoreCreateMutex();
-    xTaskCreate(
-        ZenohTelemetryTask, 
-        "ZenohTelemetry", 
-        8192,  // Tamanho razoável de stack para manipulação JSON/Rede
-        NULL, 
-        1,     // Prioridade baixa (o controle dos motores deve ser sempre prioridade)
-        NULL
-    );
+    // Core 0 alongside the WiFi stack, below the Arduino loop priority: motor
+    // control must never wait on the network. Stack covers z_open + JSON.
+    xTaskCreatePinnedToCore(ZenohTask, "Zenoh", 16384, nullptr, 1, nullptr, 0);
+    Serial.println("[Boot] Zenoh bridge task started (core 0)");
 }
 
 void loop() {
@@ -297,6 +323,13 @@ void loop() {
         g_web->loop();
     }
 
+    // Keep the radio on-channel while the operator is driving: an STA
+    // (re)association pulls it away from the SoftAP and freezes the web UI.
+    if (g_wifi && g_motion) {
+        g_wifi->setRadioBusy(g_motion->activeSource() != CmdSource::None ||
+                             g_motion->driving());
+    }
+
     // LED mode from robot state
     if (g_motion) {
         if (g_motion->estop()) {
@@ -311,6 +344,8 @@ void loop() {
     if (!g_motion || !g_odom) {
         return;
     }
+
+    drainZenohCommands(now);
 
     // Control / sensors / odom @ 50 Hz.
     // One mux sweep per tick: mapped AS5600 channels then BMI160 (no disableAll).
@@ -347,21 +382,16 @@ void loop() {
         g_motion->update(dt_s, g_gyro_z, g_gyro_valid, now);
     }
 
-    // z_open() blocks on the TCP handshake (seconds when the router is
-    // unreachable), which would stall teleop and trip the command watchdog.
-    // Only reconnect while the robot is standing still.
-    if ((!g_zenoh || (g_zenoh && !g_zenoh->isReady())) && now - g_last_zenoh_try_ms > 8000 &&
-        g_motion->activeSource() == CmdSource::None && !g_motion->driving()) {
-        g_last_zenoh_try_ms = now;
-        tryStartZenoh();
+    // Refresh the snapshot ZenohTask publishes from. Zero timeout: telemetry is
+    // never worth stalling the control loop for.
+    if (g_odom_mutex && dt_ms >= 20 && xSemaphoreTake(g_odom_mutex, 0) == pdTRUE) {
+        g_state_main = g_odom->state();
+        g_state_step = g_odom_step->state();
+        g_state_enc = g_odom_enc->state();
+        xSemaphoreGive(g_odom_mutex);
     }
 
-    if (g_odom_mutex && dt_ms >= 20) { 
-        if (xSemaphoreTake(g_odom_mutex, 0) == pdTRUE) {
-            g_state_main = g_odom->state();
-            g_state_step = g_odom_step->state();
-            g_state_enc  = g_odom_enc->state();
-            xSemaphoreGive(g_odom_mutex);
-        }
+    if (g_web) {
+        g_web->setZenohReady(g_zenoh_ready);
     }
 }
