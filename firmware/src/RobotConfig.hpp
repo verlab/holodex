@@ -57,6 +57,9 @@ struct RobotConfig {
     float gyro_deadband = 0.02f;       // rad/s — below this the gyro reads drift, not motion
     float yaw_tol = 0.026f;            // rad (~1.5°) — heading error worth correcting
     float imu_rest_acc = 0.25f;        // m/s² — IMU quiet band for zero-velocity updates
+    // Gyro Z polarity vs body +CCW. Flip if the heading runs the wrong way —
+    // a mirrored gyro turns the heading servo into positive feedback.
+    int8_t imu_sign = 1;
 
     /** Clamp encoder mux channel to 0..7 (PCA9548A). */
     static int8_t clampEncCh(int v) {
@@ -129,6 +132,7 @@ struct RobotConfig {
         } else if (yaw_tol > 0.5f) {
             yaw_tol = 0.5f;
         }
+        imu_sign = static_cast<int8_t>(prefs.getInt("imu_sg", imu_sign) < 0 ? -1 : 1);
         imu_rest_acc = prefs.getFloat("imu_racc", imu_rest_acc);
         if (imu_rest_acc < 0.02f) {
             imu_rest_acc = 0.02f;
@@ -263,6 +267,12 @@ struct RobotConfig {
             prefs.putInt("cfg_ver", 14);
             Serial.println("[CFG] migrated to v14: absolute IMU heading hold + inertial odom");
         }
+        if (prefs.getInt("cfg_ver", 0) < 15) {
+            imu_sign = 1;
+            prefs.putInt("imu_sg", 1);
+            prefs.putInt("cfg_ver", 15);
+            Serial.println("[CFG] migrated to v15: gyro Z polarity flag");
+        }
         prefs.end();
         return true;
     }
@@ -311,6 +321,7 @@ struct RobotConfig {
         prefs.putFloat("gyro_db", gyro_deadband);
         prefs.putFloat("yaw_tol", yaw_tol);
         prefs.putFloat("imu_racc", imu_rest_acc);
+        prefs.putInt("imu_sg", imu_sign);
         prefs.end();
         return true;
     }

@@ -10,9 +10,14 @@
 #include <cmath>
 
 /**
- * Applies motor commands immediately on receive (WiFi callbacks), so teleop
- * still works when the main loop is busy with SoftAP / WebSockets.
- * FastAccelStepper runs in hardware — ESP32 is not CPU-bound by 4 steppers.
+ * Owns the wheels. Commands from any source are parked here and turned into
+ * motor rates by update() alone, at the control tick.
+ *
+ * Nothing else may program the steppers. Applying a command the moment it
+ * arrived — which is what the WiFi and Zenoh callbacks used to do — overwrites
+ * whatever the assists computed on the previous tick, and the faster the
+ * command stream the more of the correction is lost: at Zenoh rates it is lost
+ * every single time.
  */
 class MotionController {
 public:
@@ -63,12 +68,7 @@ public:
         web_cmd_.stamp_ms = now_ms;
         mode_ = Mode::Cinematic;
         holding_ = false;
-
-        float hz[4] = {};
-        kin_.inverseNormalized(web_cmd_.twist, hz);
-        applyWheelHz(hz);
         active_source_ = CmdSource::Web;
-        copyHz(hz);
     }
 
     void setZenohCommand(const Twist2D& si, uint32_t now_ms) {
@@ -87,12 +87,7 @@ public:
         zenoh_cmd_.stamp_ms = now_ms;
         mode_ = Mode::Cinematic;
         holding_ = false;
-
-        float hz[4] = {};
-        kin_.inverseSi(si, hz);
-        applyWheelHz(hz);
         active_source_ = CmdSource::Zenoh;
-        copyHz(hz);
     }
 
     /**
@@ -154,10 +149,7 @@ public:
         holding_ = false;
         web_cmd_.source = CmdSource::Web;
         web_cmd_.stamp_ms = now_ms;
-
-        applyWheelHz(raw_hz_, raw_test_mode_);
         active_source_ = CmdSource::Web;
-        copyHz(raw_hz_);
     }
 
     void emergencyStop(uint32_t now_ms) {
@@ -277,7 +269,16 @@ public:
 
         // Rotation the operator actually asked for this tick, captured before any
         // assist touches it: this is what the heading reference must integrate.
-        const float omega_cmd = kin_.forwardSi(cmd_hz).omega;
+        // While coasting the wheel command already carries the previous
+        // correction, so the stored user value is faded out instead — reading it
+        // back would feed the correction into its own reference.
+        float omega_cmd;
+        if (coasting) {
+            omega_cmd = coast_omega_;
+        } else {
+            omega_cmd = kin_.forwardSi(cmd_hz).omega;
+            last_user_omega_ = omega_cmd;
+        }
 
         // Body-level speed assist (preserves mecanum coupling / ICR at center).
         // Stands down while coasting or ramping — in both cases the measured
@@ -300,7 +301,7 @@ public:
                 syncHeadingRef();  // measurement just came back — start from here
                 hold_ready_ = true;
             }
-            applyHeadingHold(cmd_hz, dt_s, omega_cmd);
+            applyHeadingHold(cmd_hz, dt_s, omega_cmd, now_ms);
         } else {
             // Leave the reference alone while blind. Pinning it to a heading that
             // is itself frozen would silently drop whatever rotation happened
@@ -344,9 +345,17 @@ private:
     static constexpr float kYawMaxCorrFrac = 0.5f;    // of max_omega
     static constexpr float kYawExitFrac = 0.35f;      // of yaw_tol — hysteresis
     static constexpr float kYawTolMinRad = 0.002f;    // floor so the servo can settle
+    static constexpr float kYawMeasFactor = 2.0f;     // correction ÷ gyro deadband
+    static constexpr float kYawSpinCmdEps = 0.05f;    // rad/s — operator is spinning
+    static constexpr uint32_t kYawHoldTimeoutMs = 2500;
+    static constexpr float kYawDivergeRad = 0.12f;    // giving up: error grew this much
     float heading_ref_ = 0.0f;                        // rad, where we should point
     bool hold_engaged_ = false;
     bool hold_ready_ = false;                         // reference synced to the IMU
+    uint32_t hold_since_ms_ = 0;
+    float hold_best_err_ = 0.0f;
+    float last_user_omega_ = 0.0f;                    // rad/s, commanded, pre-assist
+    float coast_omega_ = 0.0f;
 
     // Wheel is "arrived" within a couple of Hz of its target
     static constexpr float kAtTargetHz = 2.0f;
@@ -421,8 +430,10 @@ private:
             for (int i = 0; i < 4; ++i) {
                 cmd_hz[i] = hold_hz_[i] * k;
             }
+            coast_omega_ = last_user_omega_ * k;
             return true;
         }
+        coast_omega_ = 0.0f;
 
         holding_ = false;
         active_source_ = CmdSource::None;
@@ -445,6 +456,31 @@ private:
     }
     float imuRateCmd() const {
         return cfg_.invert_omega ? -imu_.yawRate() : imu_.yawRate();
+    }
+
+    /**
+     * Where the servo grabs on and where it lets go.
+     *
+     * Both are floored by what the gyro can still resolve. Closing an error of
+     * err calls for a rotation of about P·err; if that lands inside the drift
+     * deadband the IMU reports nothing at all while the robot turns, the error
+     * never closes, and the robot creeps forever. Never chase an error whose
+     * correction is not measurable, and keep the release strictly under the
+     * engage threshold so the hysteresis cannot invert.
+     */
+    void holdThresholds(float& engage, float& release) const {
+        const float measurable = kYawMeasFactor * cfg_.gyro_deadband / kYawHoldP;
+        release = kYawExitFrac * cfg_.yaw_tol;
+        if (release < measurable) {
+            release = measurable;
+        }
+        engage = cfg_.yaw_tol;
+        if (engage < release / 0.8f) {
+            engage = release / 0.8f;
+        }
+        if (engage < kYawTolMinRad) {
+            engage = kYawTolMinRad;
+        }
     }
 
     /** Adopt the current IMU heading as the target — nothing to correct. */
@@ -472,7 +508,7 @@ private:
      * indistinguishable from gyro drift, and the hysteresis on the way out stops
      * the robot from twitching around the threshold.
      */
-    void applyHeadingHold(float cmd_hz[4], float dt_s, float omega_cmd) {
+    void applyHeadingHold(float cmd_hz[4], float dt_s, float omega_cmd, uint32_t now_ms) {
         if (dt_s > 0.0f) {
             heading_ref_ = wrapPi(heading_ref_ + omega_cmd * dt_s);
         }
@@ -486,18 +522,45 @@ private:
             heading_ref_ = wrapPi(imuHeadingCmd() + err);
         }
 
-        // Floor the tolerance: at exactly zero the engage test always passes and
-        // the hysteresis exit never can, so the servo would latch on forever.
-        const float tol = cfg_.yaw_tol > kYawTolMinRad ? cfg_.yaw_tol : kYawTolMinRad;
+        float engage_th = 0.0f;
+        float release_th = 0.0f;
+        holdThresholds(engage_th, release_th);
+        const bool spin_cmd = fabsf(omega_cmd) > kYawSpinCmdEps;
+
         if (hold_engaged_) {
-            if (fabsf(err) < kYawExitFrac * tol) {
+            if (fabsf(err) < release_th) {
                 hold_engaged_ = false;
             }
-        } else if (fabsf(err) > tol) {
+        } else if (fabsf(err) > engage_th) {
             hold_engaged_ = true;
+            hold_since_ms_ = now_ms;
+            hold_best_err_ = fabsf(err);
         }
         if (!hold_engaged_) {
             return;
+        }
+
+        // Runaway guard. Whatever the cause — a gyro wired the other way up, a
+        // wheel that cannot deliver the correction, a floor the robot slides on
+        // — the servo must not be allowed to keep turning forever. Give up,
+        // accept the current heading as the new target, and say so. Only armed
+        // when no rotation was asked for: during a commanded spin the error
+        // legitimately grows with the ramp.
+        if (!spin_cmd) {
+            if (fabsf(err) < hold_best_err_) {
+                hold_best_err_ = fabsf(err);
+            }
+            const bool stuck = (now_ms - hold_since_ms_) > kYawHoldTimeoutMs;
+            const bool diverging = fabsf(err) > hold_best_err_ + kYawDivergeRad;
+            if (stuck || diverging) {
+                Serial.printf("[YAW] hold gave up (%s) err=%.3f rad — check gyro sign\n",
+                              diverging ? "diverging" : "timeout", err);
+                syncHeadingRef();
+                return;
+            }
+        } else {
+            hold_since_ms_ = now_ms;
+            hold_best_err_ = fabsf(err);
         }
 
         // P on the angle, D on the *rate error* — damping against the raw rate

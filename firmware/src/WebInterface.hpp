@@ -362,6 +362,15 @@ private:
         if (!doc["imu_rest_acc"].isNull()) {
             cfg_.imu_rest_acc = doc["imu_rest_acc"].as<float>();
         }
+        if (!doc["imu_sign"].isNull()) {
+            const int8_t sign = doc["imu_sign"].as<int>() < 0 ? -1 : 1;
+            if (sign != cfg_.imu_sign) {
+                cfg_.imu_sign = sign;
+                // Offsets were averaged under the old polarity, so they now have
+                // the wrong sign — relearn them before anyone trusts the heading.
+                motion_.odomImu().recalibrate();
+            }
+        }
         if (!doc["max_vx"].isNull()) {
             cfg_.max_vx = doc["max_vx"].as<float>();
         }
@@ -464,6 +473,7 @@ private:
         doc["gyro_deadband"] = cfg_.gyro_deadband;
         doc["yaw_tol"] = cfg_.yaw_tol;
         doc["imu_rest_acc"] = cfg_.imu_rest_acc;
+        doc["imu_sign"] = cfg_.imu_sign;
         doc["max_vx"] = cfg_.max_vx;
         doc["max_vy"] = cfg_.max_vy;
         doc["max_omega"] = cfg_.max_omega;

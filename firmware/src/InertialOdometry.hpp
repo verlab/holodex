@@ -70,7 +70,10 @@ public:
             return;
         }
         state_.stamp_ms = stamp_ms;
-        yaw_rate_raw_ = s.gyro_z - bias_gz_;
+        // Single place the gyro polarity is resolved: everything downstream
+        // (bias, rest test, heading, the streams) sees body +CCW.
+        const float gz = cfg_.imu_sign < 0 ? -s.gyro_z : s.gyro_z;
+        yaw_rate_raw_ = gz - bias_gz_;
 
         // Slow average of the raw accelerometer: the reference the vibration
         // test measures against.
@@ -91,7 +94,7 @@ public:
         const bool quiet_vib = vib < quiet_acc;
         const bool quiet_abs = fabsf(s.ax - bias_ax_) < quiet_acc &&
                                fabsf(s.ay - bias_ay_) < quiet_acc &&
-                               fabsf(s.gyro_z - bias_gz_) < restGyroThreshold();
+                               fabsf(gz - bias_gz_) < restGyroThreshold();
         // Until the offsets are known only the bias-free test can be trusted:
         // a mount tilted by a couple of degrees, or a typical gyro offset, would
         // fail the absolute check forever and calibration would never finish.
@@ -107,7 +110,7 @@ public:
         at_rest_ = quiet && rest_ms_ >= kRestHoldMs;
 
         if (!calibrated_) {
-            collectCalibration(s, quiet);
+            collectCalibration(s, gz, quiet);
             return;
         }
 
@@ -116,7 +119,7 @@ public:
             // pose away, and use the free samples to refine the offsets.
             vwx_ = 0.0f;
             vwy_ = 0.0f;
-            bias_gz_ += kBiasAlphaGyro * (s.gyro_z - bias_gz_);
+            bias_gz_ += kBiasAlphaGyro * (gz - bias_gz_);
             bias_ax_ += kBiasAlphaAccel * (s.ax - bias_ax_);
             bias_ay_ += kBiasAlphaAccel * (s.ay - bias_ay_);
             yaw_rate_ = 0.0f;
@@ -130,7 +133,7 @@ public:
 
         // Bias-corrected rate, then the drift deadband: below it the gyro is
         // reporting offset, not rotation, and integrating it would creep.
-        const float w = deadband(s.gyro_z - bias_gz_, cfg_.gyro_deadband);
+        const float w = deadband(gz - bias_gz_, cfg_.gyro_deadband);
         yaw_rate_ = w;
 
         const float dt = s.dt_s;
@@ -219,7 +222,7 @@ private:
      * the average — a bias learned while rolling would be baked into every
      * later estimate.
      */
-    void collectCalibration(const ImuSample& s, bool quiet) {
+    void collectCalibration(const ImuSample& s, float gz, bool quiet) {
         if (!quiet) {
             calib_n_ = 0;
             calib_gz_ = 0.0f;
@@ -227,7 +230,7 @@ private:
             calib_ay_ = 0.0f;
             return;
         }
-        calib_gz_ += s.gyro_z;
+        calib_gz_ += gz;
         calib_ax_ += s.ax;
         calib_ay_ += s.ay;
         if (++calib_n_ < kCalibSamples) {
@@ -244,14 +247,17 @@ private:
                       bias_ay_);
     }
 
+    /**
+     * Zero inside ±band, full value outside.
+     *
+     * Deliberately not the subtracting kind. Shaving the band off every reading
+     * scales slow rotations down — a 0.065 rad/s turn with a 0.02 band would be
+     * integrated as 0.045 — so the heading permanently lags the real one. Any
+     * servo closing on that heading then has to overturn by the same ratio,
+     * which is exactly how a small correction becomes an endless one.
+     */
     static float deadband(float v, float band) {
-        if (band <= 0.0f) {
-            return v;
-        }
-        if (fabsf(v) <= band) {
-            return 0.0f;
-        }
-        return v - (v > 0.0f ? band : -band);
+        return (band > 0.0f && fabsf(v) <= band) ? 0.0f : v;
     }
 
     static float wrapPi(float a) {

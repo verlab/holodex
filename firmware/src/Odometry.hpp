@@ -125,14 +125,12 @@ private:
         return a;
     }
 
-    /** Zero inside ±band, continuous outside it. */
+    /**
+     * Zero inside ±band, full value outside. Subtracting the band instead would
+     * scale down every slow rotation and leave the heading permanently short of
+     * the real one.
+     */
     static float deadband(float v, float band) {
-        if (band <= 0.0f) {
-            return v;
-        }
-        if (fabsf(v) <= band) {
-            return 0.0f;
-        }
-        return v - (v > 0.0f ? band : -band);
+        return (band > 0.0f && fabsf(v) <= band) ? 0.0f : v;
     }
 };

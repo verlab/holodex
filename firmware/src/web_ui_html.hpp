@@ -238,7 +238,8 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>Gyro band</label><input id="gyro_deadband" type="number" min="0" max="0.5" step="0.005"/></div>
       <div class="row"><label>Yaw tol (rad)</label><input id="yaw_tol" type="number" min="0" max="0.5" step="0.005"/></div>
       <div class="row"><label>IMU rest (m/s²)</label><input id="imu_rest_acc" type="number" min="0.02" max="5" step="0.05"/></div>
-      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω. Yaw assist=turn back onto the IMU angle; gyro band (rad/s) ignores drift; yaw tol=error worth correcting; IMU rest=quiet band for zero-velocity reset.</p>
+      <div class="row"><label>Flip gyro Z</label><input id="imu_sign" type="checkbox"/></div>
+      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω. Yaw assist=turn back onto the IMU angle; gyro band (rad/s) ignores drift; yaw tol=error worth correcting; IMU rest=quiet band for zero-velocity reset; flip gyro Z if the heading runs backwards.</p>
       <div class="btns"><button class="ok" type="submit">Save &amp; apply</button></div>
     </form>
 
@@ -527,6 +528,7 @@ function applyCfg(m){
   gyro_deadband.value=(m.gyro_deadband!=null)?m.gyro_deadband:0.02;
   yaw_tol.value=(m.yaw_tol!=null)?m.yaw_tol:0.026;
   imu_rest_acc.value=(m.imu_rest_acc!=null)?m.imu_rest_acc:0.25;
+  imu_sign.checked=(m.imu_sign!=null)&&m.imu_sign<0;
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
   if(m.ap_url) apUrl.textContent=m.ap_url;
@@ -627,7 +629,8 @@ cfgForm.onsubmit=async (e)=>{
     enc_odom:enc_odom.checked, enc_speed_fb:enc_speed_fb.checked,
     enc_blend:+enc_blend.value, yaw_kalman:yaw_kalman.checked,
     yaw_assist:yaw_assist.checked, gyro_deadband:+gyro_deadband.value,
-    yaw_tol:+yaw_tol.value, imu_rest_acc:+imu_rest_acc.value
+    yaw_tol:+yaw_tol.value, imu_rest_acc:+imu_rest_acc.value,
+    imu_sign:imu_sign.checked?-1:1
   };
   maxStepHz=body.max_step_hz||maxStepHz;
   maxVx=body.max_vx||maxVx; maxW=body.max_omega||maxW; maxSpeedEl.oninput();
