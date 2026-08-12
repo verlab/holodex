@@ -244,9 +244,11 @@ public:
         }
 
         // Body-level speed assist (preserves mecanum coupling / ICR at center).
-        // Skipped while coasting: the assist would fight the ramp-down.
-        if (!freewheel && !coasting && cfg_.enc_speed_fb && enc_ && enc_->fresh() &&
-            active_source_ != CmdSource::None) {
+        // Stands down while coasting or ramping — in both cases the measured
+        // twist lags the command by design, and correcting for that only winds up
+        // the integrator and overshoots once the wheels arrive.
+        if (!freewheel && !coasting && !wheelsRamping() && cfg_.enc_speed_fb && enc_ &&
+            enc_->fresh() && active_source_ != CmdSource::None) {
             applySpeedFeedback(cmd_hz, dt_s);
         } else if (active_source_ == CmdSource::None) {
             resetSpeedIntegrators();
@@ -278,6 +280,10 @@ private:
     float applied_hz_[4] = {};
     float raw_hz_[4] = {};
     uint32_t raw_stamp_ms_ = 0;
+    // Wheel is "arrived" within a couple of Hz of its target
+    static constexpr float kAtTargetHz = 2.0f;
+    // Hard accel ceiling of the step generator, applied before the split
+    static constexpr uint32_t kAccelCeilingHz = 30000;
     // Watchdog coast-down: hold the last command and fade it out
     static constexpr uint32_t kCoastMs = 250;
     bool holding_ = false;
@@ -297,6 +303,20 @@ private:
         if (mode_ == Mode::MoveTo) {
             mode_ = Mode::Idle;
         }
+    }
+
+    /** True while any wheel is still travelling to its setpoint. */
+    bool wheelsRamping() const {
+        float band = 0.02f * static_cast<float>(cfg_.max_step_hz);
+        if (band < 50.0f) {
+            band = 50.0f;
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (motors_[i] && fabsf(last_hz_[i] - motors_[i]->getCurrentSpeedHz()) > band) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void resetSpeedIntegrators() {
@@ -512,10 +532,24 @@ private:
         return t;
     }
 
+    /**
+     * Program the four steppers so they all reach their targets at the same
+     * instant. Acceleration is shared out in proportion to how far each wheel
+     * still has to travel: with a_i = a_max·Δ_i/Δ_max every wheel needs the same
+     * ramp time T = Δ_max/a_max. A wheel that arrives early is not harmless —
+     * the mecanum mix turns the mismatch into yaw or sideways drift that nobody
+     * commanded, for as long as the ramp lasts.
+     *
+     * Δ is measured against each motor's *actual* rate rather than its last
+     * setpoint, and the split is recomputed every tick while any wheel is still
+     * ramping. Teleop refreshes mid-ramp all the time, and a wheel that falls
+     * behind gets a larger share until it is back in step.
+     */
     void applyWheelHz(const float hz[4], bool freewheel_idle = false) {
-        int32_t targets[4];
-        int32_t deltas[4];
-        int32_t max_delta = 1;
+        // Logical → electrical. Saturation uses one common scale: clamping wheels
+        // individually would tilt the commanded twist instead of just slowing it.
+        float el[4];
+        float peak = 0.0f;
         for (int i = 0; i < 4; ++i) {
             float h = hz[i];
             // motor_sign from Config Flip checkboxes (teleop + zenoh). Motor-test
@@ -523,42 +557,66 @@ private:
             if (!freewheel_idle && cfg_.motor_sign[i] < 0) {
                 h = -h;
             }
-            const float lim = static_cast<float>(cfg_.max_step_hz);
-            if (h > lim) {
-                h = lim;
-            } else if (h < -lim) {
-                h = -lim;
+            el[i] = h;
+            const float a = fabsf(h);
+            if (a > peak) {
+                peak = a;
             }
-            targets[i] = static_cast<int32_t>(lroundf(h));
-            deltas[i] = abs(targets[i] - static_cast<int32_t>(lroundf(last_hz_[i])));
-            if (deltas[i] > max_delta) {
-                max_delta = deltas[i];
+        }
+        const float lim = static_cast<float>(cfg_.max_step_hz);
+        if (peak > lim && peak > 1e-6f) {
+            const float s = lim / peak;
+            for (int i = 0; i < 4; ++i) {
+                el[i] *= s;
             }
         }
 
-        // Re-issuing an unchanged setpoint costs a critical section per motor in
-        // FastAccelStepper for nothing. Teleop refreshes at ~25 Hz on top of the
-        // 50 Hz control tick, so most calls are no-ops — skip them.
+        int32_t targets[4];
+        float deltas[4];
+        float max_delta = 0.0f;
+        bool setpoint_changed = false;
+        bool ramping = false;
+        for (int i = 0; i < 4; ++i) {
+            targets[i] = static_cast<int32_t>(lroundf(el[i]));
+            if (targets[i] != static_cast<int32_t>(lroundf(last_hz_[i]))) {
+                setpoint_changed = true;
+            }
+            const float cur = motors_[i] ? motors_[i]->getCurrentSpeedHz() : 0.0f;
+            deltas[i] = fabsf(static_cast<float>(targets[i]) - cur);
+            if (deltas[i] > max_delta) {
+                max_delta = deltas[i];
+            }
+            if (deltas[i] > kAtTargetHz) {
+                ramping = true;
+            }
+        }
+
         const bool mode_changed = freewheel_idle != last_freewheel_;
         last_freewheel_ = freewheel_idle;
+
+        // Steady state: re-issuing an unchanged setpoint costs a critical section
+        // per motor in FastAccelStepper for nothing.
+        if (!mode_changed && !setpoint_changed && !ramping) {
+            return;
+        }
+
+        // Cap before splitting, never after: clamping a single wheel's share is
+        // what would desynchronise the ramp.
+        const uint32_t a_cap = cfg_.max_accel_hz < kAccelCeilingHz ? cfg_.max_accel_hz
+                                                                   : kAccelCeilingHz;
+        const float a_max = static_cast<float>(a_cap > 0 ? a_cap : 1);
+        const float ramp_s = (max_delta > 1e-3f) ? (max_delta / a_max) : 0.0f;
 
         for (int i = 0; i < 4; ++i) {
             if (!motors_[i]) {
                 continue;
             }
-            if (!mode_changed && deltas[i] == 0) {
-                continue;
-            }
-            // Proportional accel so wheels arrive together (original main.cpp).
-            // Floor keeps small-delta wheels from lagging visibly behind.
-            int32_t accel = static_cast<int32_t>(
-                (static_cast<int64_t>(cfg_.max_accel_hz) * deltas[i]) / max_delta);
-            const int32_t floor_a = static_cast<int32_t>(cfg_.max_accel_hz / 2);
-            if (targets[i] != 0 && accel < floor_a) {
-                accel = floor_a;
-            }
-            if (accel < 1) {
-                accel = 1;
+            int32_t accel = static_cast<int32_t>(lroundf(a_max));
+            if (ramp_s > 1e-6f) {
+                accel = static_cast<int32_t>(lroundf(deltas[i] / ramp_s));
+                if (accel < 1) {
+                    accel = 1;
+                }
             }
             motors_[i]->setSpeed(targets[i], accel, freewheel_idle);
             last_hz_[i] = static_cast<float>(targets[i]);
