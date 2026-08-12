@@ -53,6 +53,8 @@ struct RobotConfig {
     bool enc_speed_fb = true;          // PI speed assist from encoder vs command
     float enc_blend = 0.85f;           // weight of encoder vs FAS when both exist
     bool yaw_kalman = true;            // fuse gyro + wheel omega for heading
+    bool yaw_assist = true;            // hold heading with the gyro when no spin is asked
+    float gyro_deadband = 0.02f;       // rad/s — below this the gyro reads drift, not motion
 
     /** Clamp encoder mux channel to 0..7 (PCA9548A). */
     static int8_t clampEncCh(int v) {
@@ -112,6 +114,13 @@ struct RobotConfig {
             enc_blend = 1.0f;
         }
         yaw_kalman = prefs.getBool("yaw_kf", yaw_kalman);
+        yaw_assist = prefs.getBool("yaw_as", yaw_assist);
+        gyro_deadband = prefs.getFloat("gyro_db", gyro_deadband);
+        if (gyro_deadband < 0.0f) {
+            gyro_deadband = 0.0f;
+        } else if (gyro_deadband > 0.5f) {
+            gyro_deadband = 0.5f;
+        }
 
         // v4: quieter teleop defaults
         // v7: clear polarity experiments
@@ -224,6 +233,14 @@ struct RobotConfig {
             prefs.putInt("cfg_ver", 12);
             Serial.println("[CFG] migrated to v12: enc_sign {-1,+1,+1,-1} (M0/M3 flip)");
         }
+        if (prefs.getInt("cfg_ver", 0) < 13) {
+            yaw_assist = true;
+            gyro_deadband = 0.02f;
+            prefs.putBool("yaw_as", true);
+            prefs.putFloat("gyro_db", gyro_deadband);
+            prefs.putInt("cfg_ver", 13);
+            Serial.println("[CFG] migrated to v13: gyro yaw assist on, deadband 0.02 rad/s");
+        }
         prefs.end();
         return true;
     }
@@ -268,6 +285,8 @@ struct RobotConfig {
         prefs.putBool("enc_fb", enc_speed_fb);
         prefs.putFloat("enc_bl", enc_blend);
         prefs.putBool("yaw_kf", yaw_kalman);
+        prefs.putBool("yaw_as", yaw_assist);
+        prefs.putFloat("gyro_db", gyro_deadband);
         prefs.end();
         return true;
     }

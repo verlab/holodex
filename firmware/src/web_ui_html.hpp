@@ -232,7 +232,9 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>Speed FB</label><input id="enc_speed_fb" type="checkbox"/></div>
       <div class="row"><label>Enc blend</label><input id="enc_blend" type="number" min="0" max="1" step="0.05"/></div>
       <div class="row"><label>Yaw Kalman</label><input id="yaw_kalman" type="checkbox"/></div>
-      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω.</p>
+      <div class="row"><label>Yaw assist</label><input id="yaw_assist" type="checkbox"/></div>
+      <div class="row"><label>Gyro band</label><input id="gyro_deadband" type="number" min="0" max="0.5" step="0.005"/></div>
+      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω. Yaw assist=gyro holds heading while strafing; band (rad/s) ignores drift.</p>
       <div class="btns"><button class="ok" type="submit">Save &amp; apply</button></div>
     </form>
 
@@ -501,6 +503,8 @@ function applyCfg(m){
   enc_speed_fb.checked=m.enc_speed_fb!==false;
   enc_blend.value=(m.enc_blend!=null)?m.enc_blend:0.85;
   yaw_kalman.checked=m.yaw_kalman!==false;
+  yaw_assist.checked=m.yaw_assist!==false;
+  gyro_deadband.value=(m.gyro_deadband!=null)?m.gyro_deadband:0.02;
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
   if(m.ap_url) apUrl.textContent=m.ap_url;
@@ -599,7 +603,8 @@ cfgForm.onsubmit=async (e)=>{
     enc_ch:[+ech0.value,+ech1.value,+ech2.value,+ech3.value],
     enc_sign:[es0.checked?-1:1, es1.checked?-1:1, es2.checked?-1:1, es3.checked?-1:1],
     enc_odom:enc_odom.checked, enc_speed_fb:enc_speed_fb.checked,
-    enc_blend:+enc_blend.value, yaw_kalman:yaw_kalman.checked
+    enc_blend:+enc_blend.value, yaw_kalman:yaw_kalman.checked,
+    yaw_assist:yaw_assist.checked, gyro_deadband:+gyro_deadband.value
   };
   maxStepHz=body.max_step_hz||maxStepHz;
   maxVx=body.max_vx||maxVx; maxW=body.max_omega||maxW; maxSpeedEl.oninput();

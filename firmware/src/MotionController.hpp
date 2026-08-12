@@ -159,6 +159,7 @@ public:
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
         holding_ = false;
+        yaw_err_ = 0.0f;
         web_cmd_.stamp_ms = now_ms;
         for (int i = 0; i < 4; ++i) {
             if (motors_[i]) {
@@ -179,6 +180,7 @@ public:
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
         holding_ = false;
+        yaw_err_ = 0.0f;
         resetSpeedIntegrators();
         Serial.println("[ESTOP] cleared");
     }
@@ -254,6 +256,14 @@ public:
             resetSpeedIntegrators();
         }
 
+        // Gyro heading hold — last, so it also corrects whatever the speed assist
+        // just did. Runs even while coasting: drift during a stop is still drift.
+        if (!freewheel && cfg_.yaw_assist && active_source_ != CmdSource::None) {
+            applyYawAssist(cmd_hz, dt_s, gyro_z, gyro_valid);
+        } else {
+            yaw_err_ = 0.0f;
+        }
+
         applyWheelHz(cmd_hz, freewheel);
         copyHz(cmd_hz);
         updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
@@ -280,6 +290,16 @@ private:
     float applied_hz_[4] = {};
     float raw_hz_[4] = {};
     uint32_t raw_stamp_ms_ = 0;
+    // Gyro heading hold
+    static constexpr float kYawCmdEps = 0.01f;        // rad/s — "no spin asked"
+    static constexpr float kYawMinTransMps = 0.02f;   // only hold while translating
+    static constexpr float kYawErrLimRad = 0.35f;     // cap the accumulated error
+    static constexpr float kYawErrEpsRad = 0.005f;    // settled — stop correcting
+    static constexpr float kYawP = 1.8f;              // 1/s
+    static constexpr float kYawD = 0.5f;              // dimensionless
+    static constexpr float kYawMaxCorrFrac = 0.35f;   // of max_omega
+    float yaw_err_ = 0.0f;                            // rad, drift since reference
+
     // Wheel is "arrived" within a couple of Hz of its target
     static constexpr float kAtTargetHz = 2.0f;
     // Hard accel ceiling of the step generator, applied before the split
@@ -362,6 +382,57 @@ private:
         raw_test_mode_ = false;
         resetSpeedIntegrators();
         return false;
+    }
+
+    /**
+     * Hold heading with the gyro while the operator is translating.
+     *
+     * A mecanum base yaws on its own when strafing — unequal roller traction and
+     * wheel-speed error show up almost entirely as rotation, so the robot crabs
+     * away from a straight line. The wheels cannot see it (their FK just reports
+     * whatever they were told to do), but the gyro can.
+     *
+     * Only engages when no rotation is commanded. Anything below gyro_deadband is
+     * treated as sensor drift and neither corrected nor integrated, so a robot
+     * standing still or creeping does not slowly wind up a phantom heading error.
+     */
+    void applyYawAssist(float cmd_hz[4], float dt_s, float gyro_z, bool gyro_valid) {
+        if (!gyro_valid || isnan(gyro_z) || dt_s <= 0.0f) {
+            yaw_err_ = 0.0f;
+            return;
+        }
+
+        Twist2D tw = kin_.forwardSi(cmd_hz);
+
+        // Operator is asking for rotation, or for nothing at all: no reference
+        // heading to hold in either case.
+        const float translating = fabsf(tw.vx) + fabsf(tw.vy);
+        if (fabsf(tw.omega) > kYawCmdEps || translating < kYawMinTransMps) {
+            yaw_err_ = 0.0f;
+            return;
+        }
+
+        // Deadband: below this the gyro is reporting bias, not motion
+        float rate = gyro_z;
+        if (fabsf(rate) <= cfg_.gyro_deadband) {
+            rate = 0.0f;
+        } else {
+            rate -= (rate > 0.0f ? cfg_.gyro_deadband : -cfg_.gyro_deadband);
+        }
+
+        yaw_err_ = clampf(yaw_err_ + rate * dt_s, -kYawErrLimRad, kYawErrLimRad);
+        if (rate == 0.0f && fabsf(yaw_err_) < kYawErrEpsRad) {
+            yaw_err_ = 0.0f;
+            return;
+        }
+
+        // PD on heading: P pulls the accumulated error back, D damps the rate
+        float corr = -(kYawP * yaw_err_ + kYawD * rate);
+        const float lim = kYawMaxCorrFrac * cfg_.max_omega;
+        corr = clampf(corr, -lim, lim);
+
+        tw.omega = corr;
+        kin_.wheelsFromBody(tw, cmd_hz);
     }
 
     /**

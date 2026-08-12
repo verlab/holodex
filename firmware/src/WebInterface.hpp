@@ -350,6 +350,12 @@ private:
         if (!doc["steps_per_rev"].isNull()) {
             cfg_.steps_per_rev = doc["steps_per_rev"].as<float>();
         }
+        if (!doc["yaw_assist"].isNull()) {
+            cfg_.yaw_assist = doc["yaw_assist"].as<bool>();
+        }
+        if (!doc["gyro_deadband"].isNull()) {
+            cfg_.gyro_deadband = doc["gyro_deadband"].as<float>();
+        }
         if (!doc["max_vx"].isNull()) {
             cfg_.max_vx = doc["max_vx"].as<float>();
         }
@@ -448,6 +454,8 @@ private:
         doc["lx_m"] = cfg_.lx_m;
         doc["ly_m"] = cfg_.ly_m;
         doc["steps_per_rev"] = cfg_.steps_per_rev;
+        doc["yaw_assist"] = cfg_.yaw_assist;
+        doc["gyro_deadband"] = cfg_.gyro_deadband;
         doc["max_vx"] = cfg_.max_vx;
         doc["max_vy"] = cfg_.max_vy;
         doc["max_omega"] = cfg_.max_omega;

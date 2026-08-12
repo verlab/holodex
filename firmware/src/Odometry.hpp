@@ -61,6 +61,9 @@ public:
 
         const bool imu_ok = use_imu && gyro_valid && !isnan(gyro_z);
         if (imu_ok) {
+            // Below the deadband the gyro is reporting bias, not rotation.
+            // Integrating it makes the heading crawl while the robot sits still.
+            gyro_z = deadband(gyro_z, cfg_.gyro_deadband);
             last_gyro_z_ = gyro_z;
             have_gyro_ = true;
             if (cfg_.yaw_kalman) {
@@ -120,5 +123,16 @@ private:
             a += 2.0f * static_cast<float>(M_PI);
         }
         return a;
+    }
+
+    /** Zero inside ±band, continuous outside it. */
+    static float deadband(float v, float band) {
+        if (band <= 0.0f) {
+            return v;
+        }
+        if (fabsf(v) <= band) {
+            return 0.0f;
+        }
+        return v - (v > 0.0f ? band : -band);
     }
 };
