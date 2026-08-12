@@ -3,6 +3,7 @@
 #include "HolonomicKinematics.hpp"
 #include "RobotConfig.hpp"
 #include "RobotTypes.hpp"
+#include "AccelGyroReader.hpp"
 #include "YawKalman.hpp"
 #include <cmath>
 
@@ -38,7 +39,7 @@ public:
      * @param label     short tag stored in fusionMode() for UI/telemetry
      */
     const OdometryState& update(const float step_hz[4], float dt_s, float gyro_z,
-                                bool gyro_valid, uint32_t stamp_ms, bool use_imu,
+                                bool gyro_valid, uint32_t stamp_ms, AccelGyroReader* imu,
                                 const char* label) {
         if (dt_s <= 0.0f) {
             return state_;
@@ -59,7 +60,7 @@ public:
         body.vx = filt_.vx;
         body.vy = filt_.vy;
 
-        const bool imu_ok = use_imu && gyro_valid && !isnan(gyro_z);
+        const bool imu_ok = imu && gyro_valid && !isnan(gyro_z);
         if (imu_ok) {
             // Below the deadband the gyro is reporting bias, not rotation.
             // Integrating it makes the heading crawl while the robot sits still.
@@ -93,8 +94,14 @@ public:
         const float th = state_.pose.theta;
         const float c = cosf(th);
         const float s = sinf(th);
-        state_.pose.x += (c * body.vx - s * body.vy) * dt_s;
-        state_.pose.y += (s * body.vx + c * body.vy) * dt_s;
+        if(!imu_ok){
+            state_.pose.x += (c * body.vx - s * body.vy) * dt_s;
+            state_.pose.y += (s * body.vx + c * body.vy) * dt_s;
+        }
+        else {
+            state_.pose.x -= c * imu->accelX() * dt_s;
+            state_.pose.y -= s * imu->accelY() * dt_s;
+        }
         state_.stamp_ms = stamp_ms;
         return state_;
     }

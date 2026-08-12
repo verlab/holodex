@@ -164,9 +164,6 @@ static void ZenohTask(void* /*param*/) {
             if (!g_cfg.zenoh_enabled || g_cfg.zenoh_endpoint[0] == '\0') {
                 continue;
             }
-            if (!g_wifi || !g_wifi->staConnected()) {
-                continue;
-            }
             if (now - last_try_ms < 8000) {
                 continue;
             }
@@ -379,7 +376,7 @@ void loop() {
             }
         }
 
-        g_motion->update(dt_s, g_gyro_z, g_gyro_valid, now);
+        g_motion->update(dt_s, g_gyro_z, g_gyro_valid, g_imu, now);
     }
 
     // Refresh the snapshot ZenohTask publishes from. Zero timeout: telemetry is

@@ -6,6 +6,7 @@
 #include "RobotConfig.hpp"
 #include "RobotTypes.hpp"
 #include "stepper.hpp"
+#include "AccelGyroReader.hpp"
 #include <cmath>
 
 /**
@@ -200,12 +201,12 @@ public:
     }
     const float* appliedHz() const { return applied_hz_; }
 
-    void update(float dt_s, float gyro_z, bool gyro_valid, uint32_t now_ms) {
+    void update(float dt_s, float gyro_z, bool gyro_valid, AccelGyroReader* imu, uint32_t now_ms) {
         float cmd_hz[4] = {};
 
         if (estop_) {
             active_source_ = CmdSource::None;
-            updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
+            updateOdometryStreams(dt_s, gyro_z, gyro_valid, imu, now_ms);
             return;
         }
 
@@ -266,7 +267,7 @@ public:
 
         applyWheelHz(cmd_hz, freewheel);
         copyHz(cmd_hz);
-        updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
+        updateOdometryStreams(dt_s, gyro_z, gyro_valid, imu, now_ms);
     }
 
 private:
@@ -559,7 +560,7 @@ private:
         }
     }
 
-    void updateOdometryStreams(float dt_s, float gyro_z, bool gyro_valid, uint32_t now_ms) {
+    void updateOdometryStreams(float dt_s, float gyro_z, bool gyro_valid, AccelGyroReader* imu, uint32_t now_ms) {
         float fas[4] = {};
         float enc[4] = {};
         float blend[4] = {};
@@ -585,11 +586,11 @@ private:
         }
 
         // 1) wheels only (stepper ramp) — no IMU
-        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/false, "wheels");
+        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/nullptr, "wheels");
         // 2) wheels + encoders (blend) — no IMU
-        odom_enc_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/false, "wheels+enc");
+        odom_enc_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/nullptr, "wheels+enc");
         // 3) wheels + encoders + IMU yaw
-        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/true, "wheels+enc+imu");
+        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/imu, "wheels+enc+imu");
     }
 
     static float clampf(float v, float lo, float hi) {
