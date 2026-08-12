@@ -114,8 +114,9 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <button type="button" data-view="wheels">Pure · steppers</button>
       <button type="button" data-view="enc">+ Encoders</button>
       <button type="button" data-view="full" class="active">+ IMU</button>
+      <button type="button" data-view="imu">IMU only</button>
     </div>
-    <p class="hint" id="odomViewHint">Full = wheels+enc + IMU yaw. Table compares all three.</p>
+    <p class="hint" id="odomViewHint">Full = wheels+enc + IMU yaw. Table compares all four.</p>
     <div class="metrics">
       <div class="metric"><small>x (m)</small><b id="ox">0.000</b></div>
       <div class="metric"><small>y (m)</small><b id="oy">0.000</b></div>
@@ -132,6 +133,7 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
         <tr data-view="wheels"><td>Pure (steppers)</td><td id="cx_w">—</td><td id="cy_w">—</td><td id="cth_w">—</td><td id="cw_w">—</td></tr>
         <tr data-view="enc"><td>+ Encoders</td><td id="cx_e">—</td><td id="cy_e">—</td><td id="cth_e">—</td><td id="cw_e">—</td></tr>
         <tr data-view="full" class="sel"><td>+ IMU</td><td id="cx_f">—</td><td id="cy_f">—</td><td id="cth_f">—</td><td id="cw_f">—</td></tr>
+        <tr data-view="imu"><td>IMU only</td><td id="cx_i">—</td><td id="cy_i">—</td><td id="cth_i">—</td><td id="cw_i">—</td></tr>
       </tbody>
     </table>
     <div class="row" style="margin-top:12px"><label>Src</label><b id="src">none</b></div>
@@ -234,7 +236,9 @@ input[type=text],input[type=password],input[type=number],input[type=file]{width:
       <div class="row"><label>Yaw Kalman</label><input id="yaw_kalman" type="checkbox"/></div>
       <div class="row"><label>Yaw assist</label><input id="yaw_assist" type="checkbox"/></div>
       <div class="row"><label>Gyro band</label><input id="gyro_deadband" type="number" min="0" max="0.5" step="0.005"/></div>
-      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω. Yaw assist=gyro holds heading while strafing; band (rad/s) ignores drift.</p>
+      <div class="row"><label>Yaw tol (rad)</label><input id="yaw_tol" type="number" min="0" max="0.5" step="0.005"/></div>
+      <div class="row"><label>IMU rest (m/s²)</label><input id="imu_rest_acc" type="number" min="0.02" max="5" step="0.05"/></div>
+      <p class="hint">Enc odom=blend AS5600+FAS. Speed FB=body-twist PI→IK. Yaw KF=gyro+ω. Yaw assist=turn back onto the IMU angle; gyro band (rad/s) ignores drift; yaw tol=error worth correcting; IMU rest=quiet band for zero-velocity reset.</p>
       <div class="btns"><button class="ok" type="submit">Save &amp; apply</button></div>
     </form>
 
@@ -267,7 +271,8 @@ const maxSpeedVal=document.getElementById('maxSpeedVal');
 const odomHints={
   wheels:'Pure: FAS rates, yaw from wheel FK.',
   enc:'+Enc: AS5600 blend, yaw from wheel FK.',
-  full:'+IMU: blend rates, yaw from gyro/Kalman.'
+  full:'+IMU: blend rates, yaw from gyro/Kalman.',
+  imu:'IMU only: gyro yaw + accel dead reckoning, no wheels.'
 };
 document.querySelectorAll('#odomViewSeg button').forEach(btn=>{
   btn.onclick=()=>{
@@ -402,6 +407,13 @@ function pickOdom(m, view){
       fusion:m.odom_wheels_enc_fusion||'wheels+enc'
     };
   }
+  if(view==='imu'){
+    return {
+      x:m.x_imu, y:m.y_imu, th:m.theta_imu,
+      vx:m.vx_imu, vy:m.vy_imu, w:m.omega_imu,
+      fusion:m.odom_imu_fusion||'imu'
+    };
+  }
   return {
     x:m.x_full!=null?m.x_full:m.x,
     y:m.y_full!=null?m.y_full:m.y,
@@ -420,12 +432,20 @@ function applyOdom(m){
   ox.textContent=fmtN(sel.x,3); oy.textContent=fmtN(sel.y,3);
   oth.textContent=fmtN(sel.th!=null?sel.th*r2d:null,1);
   ovx.textContent=fmtN(sel.vx,2); ovy.textContent=fmtN(sel.vy,2); ow.textContent=fmtN(sel.w,2);
-  const w=pickOdom(m,'wheels'), e=pickOdom(m,'enc'), f=pickOdom(m,'full');
+  const w=pickOdom(m,'wheels'), e=pickOdom(m,'enc'), f=pickOdom(m,'full'), im=pickOdom(m,'imu');
   cx_w.textContent=fmtN(w.x,3); cy_w.textContent=fmtN(w.y,3); cth_w.textContent=fmtN(w.th!=null?w.th*r2d:null,1); cw_w.textContent=fmtN(w.w,2);
   cx_e.textContent=fmtN(e.x,3); cy_e.textContent=fmtN(e.y,3); cth_e.textContent=fmtN(e.th!=null?e.th*r2d:null,1); cw_e.textContent=fmtN(e.w,2);
   cx_f.textContent=fmtN(f.x,3); cy_f.textContent=fmtN(f.y,3); cth_f.textContent=fmtN(f.th!=null?f.th*r2d:null,1); cw_f.textContent=fmtN(f.w,2);
+  cx_i.textContent=fmtN(im.x,3); cy_i.textContent=fmtN(im.y,3); cth_i.textContent=fmtN(im.th!=null?im.th*r2d:null,1); cw_i.textContent=fmtN(im.w,2);
   src.textContent=m.estop?'ESTOP':(m.driving?'DRIVE':(m.source||'none'));
-  odomFusion.textContent=(sel.fusion||'-')+(m.gyro_bias!=null && odomView==='full'?' · bias '+Number(m.gyro_bias).toFixed(4):'');
+  let fus=sel.fusion||'-';
+  if(odomView==='full' && m.gyro_bias!=null) fus+=' · bias '+Number(m.gyro_bias).toFixed(4);
+  if(odomView==='imu'){
+    if(m.imu_cal===false) fus+=' · hold still';
+    if(m.imu_bias!=null) fus+=' · bias '+Number(m.imu_bias).toFixed(4);
+  }
+  if(m.yaw_hold) fus+=' · yaw hold';
+  odomFusion.textContent=fus;
   wheelSrc.textContent=m.wheel_src||'-';
   sta.textContent=m.sta||'-'; zenoh.textContent=m.zenoh||'-';
   if(m.version) fwVer.textContent='fw '+m.version+(m.build?' ('+m.build+')':'');
@@ -505,6 +525,8 @@ function applyCfg(m){
   yaw_kalman.checked=m.yaw_kalman!==false;
   yaw_assist.checked=m.yaw_assist!==false;
   gyro_deadband.value=(m.gyro_deadband!=null)?m.gyro_deadband:0.02;
+  yaw_tol.value=(m.yaw_tol!=null)?m.yaw_tol:0.026;
+  imu_rest_acc.value=(m.imu_rest_acc!=null)?m.imu_rest_acc:0.25;
   if(m.ap_ssid) apSsid.textContent=m.ap_ssid;
   if(m.ap_password) apPass.textContent=m.ap_password;
   if(m.ap_url) apUrl.textContent=m.ap_url;
@@ -604,7 +626,8 @@ cfgForm.onsubmit=async (e)=>{
     enc_sign:[es0.checked?-1:1, es1.checked?-1:1, es2.checked?-1:1, es3.checked?-1:1],
     enc_odom:enc_odom.checked, enc_speed_fb:enc_speed_fb.checked,
     enc_blend:+enc_blend.value, yaw_kalman:yaw_kalman.checked,
-    yaw_assist:yaw_assist.checked, gyro_deadband:+gyro_deadband.value
+    yaw_assist:yaw_assist.checked, gyro_deadband:+gyro_deadband.value,
+    yaw_tol:+yaw_tol.value, imu_rest_acc:+imu_rest_acc.value
   };
   maxStepHz=body.max_step_hz||maxStepHz;
   maxVx=body.max_vx||maxVx; maxW=body.max_omega||maxW; maxSpeedEl.oninput();

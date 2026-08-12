@@ -34,10 +34,11 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
         return;
     }
 
-    // Three streams only (avoid extra flash for legacy alias pubs)
+    // Four streams only (avoid extra flash for legacy alias pubs)
     if (!declarePub(odom_pub_, "holodex/odom", "holodex/odom") ||
         !declarePub(odom_wheels_pub_, "holodex/odom/wheels", "holodex/odom/wheels") ||
-        !declarePub(odom_wenc_pub_, "holodex/odom/wheels_enc", "holodex/odom/wheels_enc")) {
+        !declarePub(odom_wenc_pub_, "holodex/odom/wheels_enc", "holodex/odom/wheels_enc") ||
+        !declarePub(odom_imu_pub_, "holodex/odom/imu", "holodex/odom/imu")) {
         return;
     }
 
@@ -63,7 +64,7 @@ ZenohStateManager::ZenohStateManager(const char* router_endpoint) {
     }
 
     zenoh_ready_ = true;
-    Serial.println("[Zenoh] Ready  pub=odom | odom/wheels | odom/wheels_enc");
+    Serial.println("[Zenoh] Ready  pub=odom | odom/wheels | odom/wheels_enc | odom/imu");
 }
 
 ZenohStateManager::~ZenohStateManager() {
@@ -169,6 +170,10 @@ void ZenohStateManager::publishOdometryWheels(const OdometryState& state) {
 
 void ZenohStateManager::publishOdometryWheelsEnc(const OdometryState& state) {
     publishNamed(odom_wenc_pub_, state, "wheels+enc");
+}
+
+void ZenohStateManager::publishOdometryImu(const OdometryState& state) {
+    publishNamed(odom_imu_pub_, state, "imu");
 }
 
 void ZenohStateManager::loop() {}

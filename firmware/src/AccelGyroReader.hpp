@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RobotTypes.hpp"
+
 #include <Arduino.h>
 #include <DFRobot_BMI160.h>
 #include <cmath>
@@ -18,6 +20,13 @@ public:
 
     /** Read IMU; returns true on success. */
     bool read();
+
+    /**
+     * Last reading with its own timestamp and interval. dt_s spans from the
+     * previous *successful* read, so a dropped sample hands the whole elapsed
+     * time to the next one instead of losing it.
+     */
+    const ImuSample& lastSample() const { return sample_; }
 
     float accelX() const { return accel_mps2_[0]; }
     float accelY() const { return accel_mps2_[1]; }
@@ -39,4 +48,7 @@ private:
     bool ready_ = false;
     float accel_mps2_[3] = {};
     float gyro_rps_[3] = {};
+    ImuSample sample_{};
+    uint32_t last_us_ = 0;
+    bool have_prev_ = false;
 };

@@ -356,6 +356,12 @@ private:
         if (!doc["gyro_deadband"].isNull()) {
             cfg_.gyro_deadband = doc["gyro_deadband"].as<float>();
         }
+        if (!doc["yaw_tol"].isNull()) {
+            cfg_.yaw_tol = doc["yaw_tol"].as<float>();
+        }
+        if (!doc["imu_rest_acc"].isNull()) {
+            cfg_.imu_rest_acc = doc["imu_rest_acc"].as<float>();
+        }
         if (!doc["max_vx"].isNull()) {
             cfg_.max_vx = doc["max_vx"].as<float>();
         }
@@ -456,6 +462,8 @@ private:
         doc["steps_per_rev"] = cfg_.steps_per_rev;
         doc["yaw_assist"] = cfg_.yaw_assist;
         doc["gyro_deadband"] = cfg_.gyro_deadband;
+        doc["yaw_tol"] = cfg_.yaw_tol;
+        doc["imu_rest_acc"] = cfg_.imu_rest_acc;
         doc["max_vx"] = cfg_.max_vx;
         doc["max_vy"] = cfg_.max_vy;
         doc["max_omega"] = cfg_.max_omega;
@@ -522,6 +530,22 @@ private:
             doc["x_enc"] = we.pose.x;
             doc["y_enc"] = we.pose.y;
             doc["theta_enc"] = we.pose.theta;
+        }
+        {
+            auto& imu = motion_.odomImu();
+            const auto& i = imu.state();
+            doc["x_imu"] = i.pose.x;
+            doc["y_imu"] = i.pose.y;
+            doc["theta_imu"] = i.pose.theta;
+            doc["vx_imu"] = i.twist.vx;
+            doc["vy_imu"] = i.twist.vy;
+            doc["omega_imu"] = i.twist.omega;
+            doc["odom_imu_fusion"] = imu.mode();
+            doc["imu_cal"] = imu.calibrated();
+            doc["imu_rest"] = imu.atRest();
+            doc["imu_bias"] = imu.gyroBias();
+            doc["yaw_ref"] = motion_.headingRef();
+            doc["yaw_hold"] = motion_.headingHolding();
         }
         doc["odom_wheels_fusion"] = motion_.odomWheels().fusionMode();
         doc["odom_wheels_enc_fusion"] = motion_.odomWheelsEnc().fusionMode();

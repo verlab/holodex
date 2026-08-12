@@ -36,6 +36,7 @@ bool AccelGyroReader::begin() {
 }
 
 bool AccelGyroReader::read() {
+    sample_.valid = false;
     if (!ready_) {
         return false;
     }
@@ -47,10 +48,30 @@ bool AccelGyroReader::read() {
     // Library layout: gyro[3] then accel[3]
     bmi160_.getAccelGyroData(raw);
 
+    // Stamp as close to the transfer as possible: this is the instant the
+    // integrators must date the sample to, not the top of the control tick.
+    const uint32_t now_us = micros();
+
     for (int i = 0; i < 3; ++i) {
         gyro_rps_[i] = gyroToRps(raw[i]);
         accel_mps2_[i] = accelToMps2(raw[i + 3]);
     }
+
+    sample_.ax = accel_mps2_[0];
+    sample_.ay = accel_mps2_[1];
+    sample_.az = accel_mps2_[2];
+    sample_.gyro_z = gyro_rps_[2];
+    sample_.stamp_us = now_us;
+    // micros() overflow is harmless: unsigned wrap gives the right delta
+    sample_.dt_s = have_prev_ ? (now_us - last_us_) * 1e-6f : 0.0f;
+    // First sample, or a gap so long the integration would be meaningless
+    // (OTA, blocked loop): report dt=0 so integrators skip instead of jumping.
+    if (sample_.dt_s > 0.25f) {
+        sample_.dt_s = 0.0f;
+    }
+    sample_.valid = true;
+    last_us_ = now_us;
+    have_prev_ = true;
     return true;
 }
 

@@ -9,6 +9,24 @@ struct Twist2D {
     float omega = 0.0f;  // rad/s (+CCW)
 };
 
+/**
+ * One IMU reading with the interval it actually covers.
+ *
+ * dt_s is measured between consecutive successful reads, not between control
+ * ticks: the loop jitters (SoftAP / HTTP work) and a read can fail on a mux
+ * NACK, so integrating with the tick period would scale every sample by the
+ * wrong time and bleed straight into heading drift.
+ */
+struct ImuSample {
+    float ax = 0.0f;      // m/s², body +X forward
+    float ay = 0.0f;      // m/s², body +Y left
+    float az = 0.0f;      // m/s², body +Z up
+    float gyro_z = 0.0f;  // rad/s, +CCW
+    float dt_s = 0.0f;    // interval since the previous valid sample
+    uint32_t stamp_us = 0;
+    bool valid = false;
+};
+
 /** Planar pose in the odometry frame. */
 struct Pose2D {
     float x = 0.0f;      // m

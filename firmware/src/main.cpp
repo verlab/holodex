@@ -6,6 +6,7 @@
 #include "EncoderHub.hpp"
 #include "FirmwareVersion.hpp"
 #include "HolonomicKinematics.hpp"
+#include "InertialOdometry.hpp"
 #include "MotionController.hpp"
 #include "Odometry.hpp"
 #include "OtaService.hpp"
@@ -56,6 +57,7 @@ static HolonomicKinematics* g_kin = nullptr;
 static Odometry* g_odom = nullptr;         // wheels+enc+IMU (primary)
 static Odometry* g_odom_step = nullptr;    // wheels only (FAS, no IMU)
 static Odometry* g_odom_enc = nullptr;     // wheels+enc blend (no IMU)
+static InertialOdometry* g_odom_imu = nullptr;  // IMU only (no wheel data at all)
 static MotionController* g_motion = nullptr;
 static WifiPortal* g_wifi = nullptr;
 static WebInterface* g_web = nullptr;
@@ -67,14 +69,14 @@ static OtaService g_ota;
 static OdometryState g_state_main;
 static OdometryState g_state_step;
 static OdometryState g_state_enc;
+static OdometryState g_state_imu;
 static SemaphoreHandle_t g_odom_mutex = nullptr;
 static volatile bool g_zenoh_ready = false;
 static volatile bool g_zenoh_restart_req = false;
 
-static uint32_t g_last_ctrl_ms = 0;
-static float g_gyro_z = NAN;
-static bool g_gyro_valid = false;
-static uint32_t g_gyro_stamp_ms = 0;
+// Control tick clock. micros() (not millis()) and sampled at the moment the
+// sensors are read, so dt is the interval the integrators actually cover.
+static uint32_t g_last_tick_us = 0;
 
 static void onOtaBusy(bool busy, void* /*ctx*/) {
     g_led.setMode(busy ? StatusLed::Mode::Ota : StatusLed::Mode::Idle);
@@ -164,6 +166,9 @@ static void ZenohTask(void* /*param*/) {
             if (!g_cfg.zenoh_enabled || g_cfg.zenoh_endpoint[0] == '\0') {
                 continue;
             }
+            if (!g_wifi || !g_wifi->staConnected()) {
+                continue;
+            }
             if (now - last_try_ms < 8000) {
                 continue;
             }
@@ -190,17 +195,20 @@ static void ZenohTask(void* /*param*/) {
         OdometryState local_main;
         OdometryState local_step;
         OdometryState local_enc;
+        OdometryState local_imu;
         if (!g_odom_mutex || xSemaphoreTake(g_odom_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
             continue;
         }
         local_main = g_state_main;
         local_step = g_state_step;
         local_enc = g_state_enc;
+        local_imu = g_state_imu;
         xSemaphoreGive(g_odom_mutex);
 
         g_zenoh->publishOdometry(local_main);
         g_zenoh->publishOdometryWheels(local_step);
         g_zenoh->publishOdometryWheelsEnc(local_enc);
+        g_zenoh->publishOdometryImu(local_imu);
     }
 }
 
@@ -247,7 +255,9 @@ void setup() {
     g_odom = new Odometry(*g_kin, g_cfg);
     g_odom_step = new Odometry(*g_kin, g_cfg);
     g_odom_enc = new Odometry(*g_kin, g_cfg);
-    g_motion = new MotionController(g_cfg, g_motors, *g_kin, *g_odom, *g_odom_step, *g_odom_enc);
+    g_odom_imu = new InertialOdometry(g_cfg);
+    g_motion = new MotionController(g_cfg, g_motors, *g_kin, *g_odom, *g_odom_step, *g_odom_enc,
+                                    *g_odom_imu);
 
     g_web = new WebInterface(g_cfg, *g_motion, *g_odom, *g_wifi);
     g_web->begin(&g_ota);
@@ -291,7 +301,7 @@ void setup() {
     }
     g_web->attachSensors(g_imu, mux_ok);
 
-    g_last_ctrl_ms = millis();
+    g_last_tick_us = micros();
     Serial.println("[Boot] LED: slow=idle  fast=driving  double=ESTOP  flicker=OTA");
     Serial.println("[Boot] http://192.168.4.1/  OTA password=holodex");
     Serial.println("[Boot] Move: GET /api/move?dx=0.3&dy=0&v=0.2");
@@ -346,46 +356,39 @@ void loop() {
 
     // Control / sensors / odom @ 50 Hz.
     // One mux sweep per tick: mapped AS5600 channels then BMI160 (no disableAll).
-    const uint32_t dt_ms = now - g_last_ctrl_ms;
-    if (dt_ms >= 20) {
-        const float dt_s = dt_ms * 0.001f;
-        g_last_ctrl_ms = now;
+    // The tick clock is read here rather than at the top of loop(): the WiFi and
+    // HTTP work above can hold the loop for tens of milliseconds, and dating the
+    // samples from before that would hand the integrators the wrong interval.
+    const bool tick_due = (micros() - g_last_tick_us) >= 20000;
+    if (tick_due) {
+        const uint32_t tick_us = micros();
+        float dt_s = (tick_us - g_last_tick_us) * 1e-6f;
+        g_last_tick_us = tick_us;
+        // Survive a stall (OTA, blocked loop) without a pose jump
+        if (dt_s > 0.25f) {
+            dt_s = 0.25f;
+        }
+        const uint32_t stamp_ms = millis();
 
         if (g_enc) {
             g_enc->sample();
         }
-        if (g_imu && g_imu->ready()) {
-            if (g_imu->read()) {
-                g_gyro_z = g_imu->gyroZ();  // rad/s
-                g_gyro_valid = true;
-                g_gyro_stamp_ms = now;
-            }
-        }
-        // Drop gyro if last good sample is too old (IMU unplugged mid-run)
-        if (g_gyro_valid && (now - g_gyro_stamp_ms) > 100) {
-            g_gyro_valid = false;
-            g_gyro_z = NAN;
-            if (g_odom) {
-                g_odom->clearGyro();
-            }
-            if (g_odom_step) {
-                g_odom_step->clearGyro();
-            }
-            if (g_odom_enc) {
-                g_odom_enc->clearGyro();
-            }
+        ImuSample imu{};
+        if (g_imu && g_imu->ready() && g_imu->read()) {
+            imu = g_imu->lastSample();
         }
 
-        g_motion->update(dt_s, g_gyro_z, g_gyro_valid, g_imu, now);
-    }
+        g_motion->update(dt_s, imu, stamp_ms);
 
-    // Refresh the snapshot ZenohTask publishes from. Zero timeout: telemetry is
-    // never worth stalling the control loop for.
-    if (g_odom_mutex && dt_ms >= 20 && xSemaphoreTake(g_odom_mutex, 0) == pdTRUE) {
-        g_state_main = g_odom->state();
-        g_state_step = g_odom_step->state();
-        g_state_enc = g_odom_enc->state();
-        xSemaphoreGive(g_odom_mutex);
+        // Refresh the snapshot ZenohTask publishes from. Zero timeout:
+        // telemetry is never worth stalling the control loop for.
+        if (g_odom_mutex && xSemaphoreTake(g_odom_mutex, 0) == pdTRUE) {
+            g_state_main = g_odom->state();
+            g_state_step = g_odom_step->state();
+            g_state_enc = g_odom_enc->state();
+            g_state_imu = g_odom_imu->state();
+            xSemaphoreGive(g_odom_mutex);
+        }
     }
 
     if (g_web) {

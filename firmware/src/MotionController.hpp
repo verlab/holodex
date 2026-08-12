@@ -2,11 +2,11 @@
 
 #include "EncoderHub.hpp"
 #include "HolonomicKinematics.hpp"
+#include "InertialOdometry.hpp"
 #include "Odometry.hpp"
 #include "RobotConfig.hpp"
 #include "RobotTypes.hpp"
 #include "stepper.hpp"
-#include "AccelGyroReader.hpp"
 #include <cmath>
 
 /**
@@ -17,12 +17,14 @@
 class MotionController {
 public:
     MotionController(RobotConfig& cfg, Stepper* motors[4], HolonomicKinematics& kin,
-                     Odometry& odom_fused, Odometry& odom_stepper, Odometry& odom_encoder)
+                     Odometry& odom_fused, Odometry& odom_stepper, Odometry& odom_encoder,
+                     InertialOdometry& odom_imu)
         : cfg_(cfg),
           kin_(kin),
           odom_(odom_fused),
           odom_step_(odom_stepper),
-          odom_enc_(odom_encoder) {
+          odom_enc_(odom_encoder),
+          imu_(odom_imu) {
         for (int i = 0; i < 4; ++i) {
             motors_[i] = motors[i];
         }
@@ -31,10 +33,11 @@ public:
     void attachEncoders(EncoderHub* enc) { enc_ = enc; }
     EncoderHub* encoders() const { return enc_; }
 
-    /** Primary: wheels+enc+IMU. Compare: wheels-only, wheels+enc (no IMU). */
+    /** Primary: wheels+enc+IMU. Compare: wheels-only, wheels+enc, IMU-only. */
     Odometry& odomFull() { return odom_; }
     Odometry& odomWheels() { return odom_step_; }
     Odometry& odomWheelsEnc() { return odom_enc_; }
+    InertialOdometry& odomImu() { return imu_; }
     // Aliases kept for older call sites
     Odometry& odomFused() { return odom_; }
     Odometry& odomStepper() { return odom_step_; }
@@ -44,6 +47,10 @@ public:
         odom_.reset();
         odom_step_.reset();
         odom_enc_.reset();
+        // Also re-learns the IMU offsets, so the robot must sit still for a
+        // moment after a reset before the inertial stream comes back.
+        imu_.reset();
+        syncHeadingRef();
     }
 
     void setWebCommand(const Twist2D& ncmd, uint32_t now_ms) {
@@ -160,7 +167,7 @@ public:
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
         holding_ = false;
-        yaw_err_ = 0.0f;
+        syncHeadingRef();
         web_cmd_.stamp_ms = now_ms;
         for (int i = 0; i < 4; ++i) {
             if (motors_[i]) {
@@ -181,7 +188,7 @@ public:
         zenoh_cmd_ = {};
         mode_ = Mode::Idle;
         holding_ = false;
-        yaw_err_ = 0.0f;
+        syncHeadingRef();
         resetSpeedIntegrators();
         Serial.println("[ESTOP] cleared");
     }
@@ -190,23 +197,45 @@ public:
     const char* wheelMeasureSrc() const { return measure_src_; }
 
     bool estop() const { return estop_; }
+    /**
+     * Wheels are turning. Deliberately not gated on an active command: the
+     * heading hold moves the robot with no command present, and the LED / radio
+     * guards must treat that as motion.
+     */
     bool driving() const {
-        return !estop_ && active_source_ != CmdSource::None &&
-               (fabsf(applied_hz_[0]) + fabsf(applied_hz_[1]) + fabsf(applied_hz_[2]) +
-                fabsf(applied_hz_[3])) > 1.0f;
+        return !estop_ && (fabsf(applied_hz_[0]) + fabsf(applied_hz_[1]) +
+                           fabsf(applied_hz_[2]) + fabsf(applied_hz_[3])) > 1.0f;
     }
+    /** True while the yaw servo is actively turning the robot back on heading. */
+    bool headingHolding() const { return hold_engaged_; }
+    float headingRef() const { return heading_ref_; }
     CmdSource activeSource() const { return active_source_; }
     bool motorOk(int i) const {
         return i >= 0 && i < 4 && motors_[i] && motors_[i]->ok();
     }
     const float* appliedHz() const { return applied_hz_; }
 
-    void update(float dt_s, float gyro_z, bool gyro_valid, AccelGyroReader* imu, uint32_t now_ms) {
+    /**
+     * One control tick.
+     *
+     * @param dt_s interval since the previous tick, measured at sampling time
+     * @param imu  latest IMU sample, carrying its own dt for the integrators
+     */
+    void update(float dt_s, const ImuSample& imu, uint32_t now_ms) {
+        // Inertial state first: the heading servo below reads it this same tick,
+        // and it integrates on the sample's own clock, not on dt_s.
+        imu_.update(imu, now_ms);
+        const bool gyro_valid = imu.valid && imu_.calibrated();
+        // Wheel streams get the bias-corrected rate; each applies its own
+        // deadband, so do not hand them the already-deadbanded value.
+        const float gyro_z = gyro_valid ? imu_.yawRateRaw() : NAN;
+
         float cmd_hz[4] = {};
 
         if (estop_) {
             active_source_ = CmdSource::None;
-            updateOdometryStreams(dt_s, gyro_z, gyro_valid, imu, now_ms);
+            syncHeadingRef();
+            updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
             return;
         }
 
@@ -246,6 +275,10 @@ public:
             coasting = serviceCommandTimeout(cmd_hz, now_ms);
         }
 
+        // Rotation the operator actually asked for this tick, captured before any
+        // assist touches it: this is what the heading reference must integrate.
+        const float omega_cmd = kin_.forwardSi(cmd_hz).omega;
+
         // Body-level speed assist (preserves mecanum coupling / ICR at center).
         // Stands down while coasting or ramping — in both cases the measured
         // twist lags the command by design, and correcting for that only winds up
@@ -257,17 +290,29 @@ public:
             resetSpeedIntegrators();
         }
 
-        // Gyro heading hold — last, so it also corrects whatever the speed assist
-        // just did. Runs even while coasting: drift during a stop is still drift.
-        if (!freewheel && cfg_.yaw_assist && active_source_ != CmdSource::None) {
-            applyYawAssist(cmd_hz, dt_s, gyro_z, gyro_valid);
+        // Absolute heading hold — last, so it also corrects whatever the speed
+        // assist just did. Runs with or without an active command: if the IMU
+        // says the robot is not pointing where it should, it gets turned back.
+        // Skipped only for the motor test bench, where the operator drives each
+        // axis by hand and an injected rotation would corrupt the measurement.
+        if (!freewheel && mode_ != Mode::RawMotors && cfg_.yaw_assist && gyro_valid) {
+            if (!hold_ready_) {
+                syncHeadingRef();  // measurement just came back — start from here
+                hold_ready_ = true;
+            }
+            applyHeadingHold(cmd_hz, dt_s, omega_cmd);
         } else {
-            yaw_err_ = 0.0f;
+            // Leave the reference alone while blind. Pinning it to a heading that
+            // is itself frozen would silently drop whatever rotation happened
+            // during the gap, and the servo would pay that back as a spurious
+            // spin the moment samples return.
+            hold_ready_ = false;
+            hold_engaged_ = false;
         }
 
         applyWheelHz(cmd_hz, freewheel);
         copyHz(cmd_hz);
-        updateOdometryStreams(dt_s, gyro_z, gyro_valid, imu, now_ms);
+        updateOdometryStreams(dt_s, gyro_z, gyro_valid, now_ms);
     }
 
 private:
@@ -278,6 +323,7 @@ private:
     Odometry& odom_;       // wheels + enc blend + IMU yaw (primary / ROS)
     Odometry& odom_step_;  // FAS wheel rates only, yaw from wheels (no IMU)
     Odometry& odom_enc_;   // FAS+AS5600 blend, yaw from wheels (no IMU)
+    InertialOdometry& imu_;  // IMU only — also the absolute heading reference
     EncoderHub* enc_ = nullptr;
     Stepper* motors_[4] = {};
     VelocityCommand web_cmd_{};
@@ -291,15 +337,16 @@ private:
     float applied_hz_[4] = {};
     float raw_hz_[4] = {};
     uint32_t raw_stamp_ms_ = 0;
-    // Gyro heading hold
-    static constexpr float kYawCmdEps = 0.01f;        // rad/s — "no spin asked"
-    static constexpr float kYawMinTransMps = 0.02f;   // only hold while translating
-    static constexpr float kYawErrLimRad = 0.35f;     // cap the accumulated error
-    static constexpr float kYawErrEpsRad = 0.005f;    // settled — stop correcting
-    static constexpr float kYawP = 1.8f;              // 1/s
-    static constexpr float kYawD = 0.5f;              // dimensionless
-    static constexpr float kYawMaxCorrFrac = 0.35f;   // of max_omega
-    float yaw_err_ = 0.0f;                            // rad, drift since reference
+    // Absolute heading hold against the IMU angle
+    static constexpr float kYawErrLimRad = 0.6f;      // cap on the debt we chase
+    static constexpr float kYawHoldP = 2.5f;          // 1/s
+    static constexpr float kYawHoldD = 0.35f;         // dimensionless
+    static constexpr float kYawMaxCorrFrac = 0.5f;    // of max_omega
+    static constexpr float kYawExitFrac = 0.35f;      // of yaw_tol — hysteresis
+    static constexpr float kYawTolMinRad = 0.002f;    // floor so the servo can settle
+    float heading_ref_ = 0.0f;                        // rad, where we should point
+    bool hold_engaged_ = false;
+    bool hold_ready_ = false;                         // reference synced to the IMU
 
     // Wheel is "arrived" within a couple of Hz of its target
     static constexpr float kAtTargetHz = 2.0f;
@@ -386,53 +433,81 @@ private:
     }
 
     /**
-     * Hold heading with the gyro while the operator is translating.
+     * IMU heading / rate expressed in the same frame as the commands.
      *
-     * A mecanum base yaws on its own when strafing — unequal roller traction and
-     * wheel-speed error show up almost entirely as rotation, so the robot crabs
-     * away from a straight line. The wheels cannot see it (their FK just reports
-     * whatever they were told to do), but the gyro can.
-     *
-     * Only engages when no rotation is commanded. Anything below gyro_deadband is
-     * treated as sensor drift and neither corrected nor integrated, so a robot
-     * standing still or creeping does not slowly wind up a phantom heading error.
+     * cmd_hz already carries invert_omega, so the twist recovered from it lives
+     * in the inverted frame while the gyro always reports the physical one.
+     * Comparing the two directly would turn the servo into positive feedback the
+     * moment someone ticks that box on the config page.
      */
-    void applyYawAssist(float cmd_hz[4], float dt_s, float gyro_z, bool gyro_valid) {
-        if (!gyro_valid || isnan(gyro_z) || dt_s <= 0.0f) {
-            yaw_err_ = 0.0f;
+    float imuHeadingCmd() const {
+        return cfg_.invert_omega ? -imu_.heading() : imu_.heading();
+    }
+    float imuRateCmd() const {
+        return cfg_.invert_omega ? -imu_.yawRate() : imu_.yawRate();
+    }
+
+    /** Adopt the current IMU heading as the target — nothing to correct. */
+    void syncHeadingRef() {
+        heading_ref_ = imuHeadingCmd();
+        hold_engaged_ = false;
+        hold_ready_ = false;
+    }
+
+    /**
+     * Servo the chassis onto the heading the commands add up to, using the IMU
+     * angle as ground truth.
+     *
+     * The reference integrates only what the operator asked for; the correction
+     * is deliberately kept out of it. Feeding the correction back — or using the
+     * wheel-integrated angle as the reference — turns the loop into a tail chase,
+     * because rotating the robot moves reference and measurement by the same
+     * amount and the error never closes.
+     *
+     * Runs whether or not a command is active, so an unmodelled yaw (mecanum
+     * roller slip while strafing, a nudge from a person, a wheel that lost a few
+     * steps) is turned back out even while the robot is nominally parked.
+     *
+     * yaw_tol sets how much error is worth chasing. Below it the reading is
+     * indistinguishable from gyro drift, and the hysteresis on the way out stops
+     * the robot from twitching around the threshold.
+     */
+    void applyHeadingHold(float cmd_hz[4], float dt_s, float omega_cmd) {
+        if (dt_s > 0.0f) {
+            heading_ref_ = wrapPi(heading_ref_ + omega_cmd * dt_s);
+        }
+
+        float err = wrapPi(heading_ref_ - imuHeadingCmd());
+        // Forgive anything past the cap. A long spin that slipped would
+        // otherwise bank a debt the robot pays back as a surprise rotation the
+        // moment the operator lets go.
+        if (fabsf(err) > kYawErrLimRad) {
+            err = err > 0.0f ? kYawErrLimRad : -kYawErrLimRad;
+            heading_ref_ = wrapPi(imuHeadingCmd() + err);
+        }
+
+        // Floor the tolerance: at exactly zero the engage test always passes and
+        // the hysteresis exit never can, so the servo would latch on forever.
+        const float tol = cfg_.yaw_tol > kYawTolMinRad ? cfg_.yaw_tol : kYawTolMinRad;
+        if (hold_engaged_) {
+            if (fabsf(err) < kYawExitFrac * tol) {
+                hold_engaged_ = false;
+            }
+        } else if (fabsf(err) > tol) {
+            hold_engaged_ = true;
+        }
+        if (!hold_engaged_) {
             return;
         }
 
-        Twist2D tw = kin_.forwardSi(cmd_hz);
-
-        // Operator is asking for rotation, or for nothing at all: no reference
-        // heading to hold in either case.
-        const float translating = fabsf(tw.vx) + fabsf(tw.vy);
-        if (fabsf(tw.omega) > kYawCmdEps || translating < kYawMinTransMps) {
-            yaw_err_ = 0.0f;
-            return;
-        }
-
-        // Deadband: below this the gyro is reporting bias, not motion
-        float rate = gyro_z;
-        if (fabsf(rate) <= cfg_.gyro_deadband) {
-            rate = 0.0f;
-        } else {
-            rate -= (rate > 0.0f ? cfg_.gyro_deadband : -cfg_.gyro_deadband);
-        }
-
-        yaw_err_ = clampf(yaw_err_ + rate * dt_s, -kYawErrLimRad, kYawErrLimRad);
-        if (rate == 0.0f && fabsf(yaw_err_) < kYawErrEpsRad) {
-            yaw_err_ = 0.0f;
-            return;
-        }
-
-        // PD on heading: P pulls the accumulated error back, D damps the rate
-        float corr = -(kYawP * yaw_err_ + kYawD * rate);
+        // P on the angle, D on the *rate error* — damping against the raw rate
+        // would fight every commanded rotation instead of just the unwanted ones.
+        float corr = kYawHoldP * err + kYawHoldD * (omega_cmd - imuRateCmd());
         const float lim = kYawMaxCorrFrac * cfg_.max_omega;
         corr = clampf(corr, -lim, lim);
 
-        tw.omega = corr;
+        Twist2D tw = kin_.forwardSi(cmd_hz);
+        tw.omega = clampf(tw.omega + corr, -cfg_.max_omega, cfg_.max_omega);
         kin_.wheelsFromBody(tw, cmd_hz);
     }
 
@@ -560,7 +635,7 @@ private:
         }
     }
 
-    void updateOdometryStreams(float dt_s, float gyro_z, bool gyro_valid, AccelGyroReader* imu, uint32_t now_ms) {
+    void updateOdometryStreams(float dt_s, float gyro_z, bool gyro_valid, uint32_t now_ms) {
         float fas[4] = {};
         float enc[4] = {};
         float blend[4] = {};
@@ -586,15 +661,25 @@ private:
         }
 
         // 1) wheels only (stepper ramp) — no IMU
-        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/nullptr, "wheels");
+        odom_step_.update(fas, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/false, "wheels");
         // 2) wheels + encoders (blend) — no IMU
-        odom_enc_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/nullptr, "wheels+enc");
+        odom_enc_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/false, "wheels+enc");
         // 3) wheels + encoders + IMU yaw
-        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/imu, "wheels+enc+imu");
+        odom_.update(blend, dt_s, gyro_z, gyro_valid, now_ms, /*use_imu=*/true, "wheels+enc+imu");
     }
 
     static float clampf(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    static float wrapPi(float a) {
+        while (a > static_cast<float>(M_PI)) {
+            a -= 2.0f * static_cast<float>(M_PI);
+        }
+        while (a < -static_cast<float>(M_PI)) {
+            a += 2.0f * static_cast<float>(M_PI);
+        }
+        return a;
     }
 
     Twist2D clampNorm(Twist2D t) const {

@@ -53,8 +53,10 @@ struct RobotConfig {
     bool enc_speed_fb = true;          // PI speed assist from encoder vs command
     float enc_blend = 0.85f;           // weight of encoder vs FAS when both exist
     bool yaw_kalman = true;            // fuse gyro + wheel omega for heading
-    bool yaw_assist = true;            // hold heading with the gyro when no spin is asked
+    bool yaw_assist = true;            // servo heading onto the IMU angle
     float gyro_deadband = 0.02f;       // rad/s — below this the gyro reads drift, not motion
+    float yaw_tol = 0.026f;            // rad (~1.5°) — heading error worth correcting
+    float imu_rest_acc = 0.25f;        // m/s² — IMU quiet band for zero-velocity updates
 
     /** Clamp encoder mux channel to 0..7 (PCA9548A). */
     static int8_t clampEncCh(int v) {
@@ -120,6 +122,18 @@ struct RobotConfig {
             gyro_deadband = 0.0f;
         } else if (gyro_deadband > 0.5f) {
             gyro_deadband = 0.5f;
+        }
+        yaw_tol = prefs.getFloat("yaw_tol", yaw_tol);
+        if (yaw_tol < 0.0f) {
+            yaw_tol = 0.0f;
+        } else if (yaw_tol > 0.5f) {
+            yaw_tol = 0.5f;
+        }
+        imu_rest_acc = prefs.getFloat("imu_racc", imu_rest_acc);
+        if (imu_rest_acc < 0.02f) {
+            imu_rest_acc = 0.02f;
+        } else if (imu_rest_acc > 5.0f) {
+            imu_rest_acc = 5.0f;
         }
 
         // v4: quieter teleop defaults
@@ -241,6 +255,14 @@ struct RobotConfig {
             prefs.putInt("cfg_ver", 13);
             Serial.println("[CFG] migrated to v13: gyro yaw assist on, deadband 0.02 rad/s");
         }
+        if (prefs.getInt("cfg_ver", 0) < 14) {
+            yaw_tol = 0.026f;
+            imu_rest_acc = 0.25f;
+            prefs.putFloat("yaw_tol", yaw_tol);
+            prefs.putFloat("imu_racc", imu_rest_acc);
+            prefs.putInt("cfg_ver", 14);
+            Serial.println("[CFG] migrated to v14: absolute IMU heading hold + inertial odom");
+        }
         prefs.end();
         return true;
     }
@@ -287,6 +309,8 @@ struct RobotConfig {
         prefs.putBool("yaw_kf", yaw_kalman);
         prefs.putBool("yaw_as", yaw_assist);
         prefs.putFloat("gyro_db", gyro_deadband);
+        prefs.putFloat("yaw_tol", yaw_tol);
+        prefs.putFloat("imu_racc", imu_rest_acc);
         prefs.end();
         return true;
     }

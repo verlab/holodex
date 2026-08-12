@@ -16,11 +16,12 @@ struct MotorDTO {
 } __attribute__((packed));
 
 /**
- * Zenoh bridge — three comparable odometry streams:
+ * Zenoh bridge — four comparable odometry streams:
  *   holodex/cmd_vel              (sub) JSON twist
  *   holodex/odom                 (pub) wheels+enc+IMU  (primary)
  *   holodex/odom/wheels          (pub) stepper rates, yaw from wheels
  *   holodex/odom/wheels_enc      (pub) encoder blend, yaw from wheels
+ *   holodex/odom/imu             (pub) inertial only, no wheel data
  *   demo/pc_to_esp               (sub) raw motor Hz
  *
  * Legacy aliases also published:
@@ -50,6 +51,7 @@ public:
     void publishOdometry(const OdometryState& state);             // full
     void publishOdometryWheels(const OdometryState& state);       // wheels only
     void publishOdometryWheelsEnc(const OdometryState& state);    // wheels+enc
+    void publishOdometryImu(const OdometryState& state);          // IMU only
     // Back-compat names
     void publishOdometryStepper(const OdometryState& state) { publishOdometryWheels(state); }
     void publishOdometryEncoder(const OdometryState& state) { publishOdometryWheelsEnc(state); }
@@ -67,6 +69,7 @@ private:
     z_owned_publisher_t odom_pub_{};
     z_owned_publisher_t odom_wheels_pub_{};
     z_owned_publisher_t odom_wenc_pub_{};
+    z_owned_publisher_t odom_imu_pub_{};
     z_owned_subscriber_t cmd_sub_{};
     z_owned_subscriber_t motor_sub_{};
     bool zenoh_ready_ = false;
