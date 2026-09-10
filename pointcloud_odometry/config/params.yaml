@@ -1,0 +1,29 @@
+pointcloud_filter_component:
+  ros__parameters:
+    input_cloud_topic: "/camera/depth/points"
+    output_cloud_topic: "/camera/filtered_points"
+    mask_topic: "/yolo/dynamic_mask"
+    stride_u: 8
+    stride_v: 8
+    min_range: 0.4
+    max_range: 3.8
+    enable_dynamic_filter: false
+    mask_timeout_sec: 0.5
+
+icp_odometry_component:
+  ros__parameters:
+    input_cloud_topic: "/camera/filtered_points"
+    odom_topic: "/icp/odom"
+    initial_guess_topic: "/odom_combined"
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+    publish_tf: false
+    use_tf_extrinsic: false
+    voxel_resolution: 0.15
+    keyframe_delta_trans: 0.15
+    keyframe_delta_rot_deg: 8.0
+    num_threads: 4
+    max_iterations: 30
+    max_corr_dist: 0.30
+    default_map_path: "/home/orangepi/submap_cloud.ply"
+    save_on_shutdown: false
