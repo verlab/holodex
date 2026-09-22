@@ -61,6 +61,12 @@ flowchart TD
 
 ```text
 .
+├── firmware/
+│   └── esp32_firmware/               # ESP-IDF micro-ROS firmware for ESP32 & ESP32-P4
+│       ├── main/                     # micro-ROS node (Heartbeat pub, LED sub, auto-reconnect)
+│       ├── launch/                   # micro_ros_agent.launch.py for ROS 2 Humble
+│       └── scripts/                  # Automated setup, udev rules, and flashing scripts
+│
 ├── Models/
 │   └── yolov8n_seg_final.nb          # Compiled INT8 network binary for VeriSilicon VIP9000 NPU
 │

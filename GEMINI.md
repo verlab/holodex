@@ -81,6 +81,19 @@ O pacote foi desenhado para contornar o maior gargalo de odometria 3D em ARM emb
 
 ---
 
+### 2.4. Pacote `esp32_firmware` (micro-ROS para Controle de Base)
+
+* **Hardware Target:** ESP32-WROOM-32 (DevKit v1) via USB Serial (conversor Silicon Labs CP2102 onboard), preparado para migração futura ao **ESP32-P4**.
+* **Framework:** **ESP-IDF v5.1 / v5.2** utilizando o componente `micro_ros_espidf_component` (branch `humble`).
+* **Transporte:** Serial XRCE-DDS customizado (`esp32_serial_transport.c`) operando na UART0 a **921,600 bps**.
+* **Isolamento de Console:** Console de log do ESP-IDF desativado na UART0 (`CONFIG_ESP_CONSOLE_NONE=y`) para evitar contaminação do canal binário de micro-ROS com mensagens ASCII de boot/debug.
+* **Topologia de Tópicos:**
+  * `/esp32/heartbeat` (`std_msgs/msg/Int32`): Contador heartbeat a 1 Hz com auto-reconexão no client.
+  * `/esp32/led` (`std_msgs/msg/Bool`): Controle remoto do LED de status (GPIO 2).
+* **Execução na Orange Pi:** Nó `micro_ros_agent` em C++ lançado via `micro_ros_agent.launch.py` (ou `ros2 launch`). Porta configurada por padrão para `/dev/esp32` (via regra udev) ou `/dev/ttyUSB0`.
+
+---
+
 ## 3. Catálogo de Problemas Críticos e Diagnósticos (Post-Mortems)
 
 Esta seção documenta bugs reais encontrados durante os testes práticos na bancada e como foram definitivamente sanados. **Não reverta essas correções.**
