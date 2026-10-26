@@ -87,12 +87,23 @@ O pacote foi desenhado para contornar o maior gargalo de odometria 3D em ARM emb
 * **Framework:** **ESP-IDF v5.2** utilizando o componente `micro_ros_espidf_component` (branch `humble`).
 * **Transporte:** Serial XRCE-DDS customizado (`esp32_serial_transport.c`) operando na UART0 a **921,600 bps** com MTU customizado de **1024 bytes** (necessário para pacotes grandes como `nav_msgs/msg/Odometry`).
 * **Isolamento de Console:** Console de log do ESP-IDF desativado na UART0 (`CONFIG_ESP_CONSOLE_NONE=y`) para evitar contaminação do canal binário de micro-ROS com mensagens ASCII de boot/debug.
-* **Arquitetura de Classes (C++ Modular):**
-  * [`MicroRosBridge`](file:///home/alisson/orange/firmware/esp32_firmware/main/micro_ros_bridge.hpp): Gerencia publicadores, subscritores e buffers estáticos de mensagens ROS 2 com sincronização de relógio epoch via `rmw_uros_sync_session`.
-  * [`MecanumKinematics`](file:///home/alisson/orange/firmware/esp32_firmware/main/mecanum_kinematics.hpp): Cinemática inversa ($v_x, v_y, \omega_z \to \omega_i$), direta e integrador de odometria para base 4WD Mecanum.
-  * [`StepperInterface`](file:///home/alisson/orange/firmware/esp32_firmware/main/stepper_interface.hpp): Abstração de controle dos 4 motores de passo (FastAccelStepper).
-  * [`EncoderInterface`](file:///home/alisson/orange/firmware/esp32_firmware/main/encoder_interface.hpp): Abstração dos encoders de quadratura com cálculo de velocidades angulares em rad/s.
-  * [`ImuInterface`](file:///home/alisson/orange/firmware/esp32_firmware/main/imu_interface.hpp): Abstração da IMU 6-DoF/9-DoF com estimativa de orientação por quatérnion.
+* **Arquitetura de Processos e Interfaces (C++ Desacoplado):**
+  * **Interfaces Abstratas (`main/interfaces/`):**
+    * [`IMotorController`](file:///home/alisson/orange/firmware/esp32_firmware/main/interfaces/i_motor_controller.hpp): Contrato puro para controle de motores, velocidades alvo, parada de emergência e telemetria.
+    * [`IEncoderSensor`](file:///home/alisson/orange/firmware/esp32_firmware/main/interfaces/i_encoder_sensor.hpp): Contrato puro para leitura de encoders magnéticos/ópticos e contagem de pulsos.
+    * [`IImuSensor`](file:///home/alisson/orange/firmware/esp32_firmware/main/interfaces/i_imu_sensor.hpp): Contrato puro para aquisição de aceleração, velocidade angular e atitude ($q$).
+    * [`IYawFilter`](file:///home/alisson/orange/firmware/esp32_firmware/main/interfaces/i_yaw_filter.hpp): Contrato para estimadores de orientação e fusão de guinada (Yaw).
+    * [`IRosBridge`](file:///home/alisson/orange/firmware/esp32_firmware/main/interfaces/i_ros_bridge.hpp): Contrato para a camada de comunicação micro-ROS.
+  * **Processos Independentes com Afinidade de Núcleo (Dual-Core):**
+    * [`ControlProcess`](file:///home/alisson/orange/firmware/esp32_firmware/main/control_process.hpp) (Core 1, 50 Hz): Loop de controle em tempo real determinístico. Amostra encoders, IMU, integra cinemática Mecanum 4WD, aplica o filtro de Kalman de 2 estados para Yaw, processa watchdog de segurança (500 ms) e comanda os motores. Gera snapshots atômicos (`StateSnapshot`) protegidos por mutex.
+    * [`CommunicationProcess`](file:///home/alisson/orange/firmware/esp32_firmware/main/communication_process.hpp) (Core 0, micro-ROS task): Máquina de estados XRCE-DDS serial, sincronização de relógio epoch via `rmw_uros_sync_session`, subscrição com watchdog de `/cmd_vel` e `/esp32/led`, e publicação periódica assíncrona consumindo os snapshots do processo de controle.
+  * **Drivers de Hardware e Filtros Concretos (Portados do Holodex):**
+    * [`As5600MuxEncoder`](file:///home/alisson/orange/firmware/esp32_firmware/main/encoder_sensor.hpp): Mapeia o multiplexador I2C PCA9548A (`0x70`) e lê os 4 encoders magnéticos AS5600 de 12 bits (`0x36`) nos canais 0, 1, 4 e 5, com tratamento de descontinuidade de ângulo (unwrapping) e fallback seguro.
+    * [`Bmi160ImuSensor`](file:///home/alisson/orange/firmware/esp32_firmware/main/imu_sensor.hpp): Driver do DFRobot BMI160 6-DoF no canal 6 do multiplexador (ou barramento I2C direto em `0x69`), configurado com escala de giro de $\pm 2000^\circ/\text{s}$, acelerômetro a $\pm 2\text{g}$, deadband angular de $0.02\text{ rad/s}$ e integração de quatérnion.
+    * [`StepDirMotorController`](file:///home/alisson/orange/firmware/esp32_firmware/main/motor_controller.hpp): Controlador de 4 eixos de passo/direção compatível com FastAccelStepper (pinos FL: 19/18/17, FR: 27/14/13, RL: 23/22/32, RR: 33/25/26), 6400 passos/rev (32 micropassos) e chave de habilitação ativa em nível baixo.
+    * [`KalmanYawFilter`](file:///home/alisson/orange/firmware/esp32_firmware/main/yaw_kalman_filter.hpp): Filtro de Kalman discreto de 2 estados ($x = [\theta, b_z]^T$) fundindo taxa angular do giroscópio com a estimativa cinemática das rodas Mecanum.
+    * [`I2cBus`](file:///home/alisson/orange/firmware/esp32_firmware/main/i2c_bus.hpp): Driver mestre I2C thread-safe protegido por FreeRTOS mutex operando a 400 kHz em SDA=21 e SCL=5.
+    * [`main.cpp`](file:///home/alisson/orange/firmware/esp32_firmware/main/main.cpp): Orquestrador ultra-limpo de alto nível que instancia os drivers de hardware, conecta as interfaces por injeção de dependência e inicializa as tarefas nos respectivos núcleos.
 * **Topologia de Tópicos Ativos:**
   * **Publicadores (ESP32 $\to$ Orange Pi):**
     * `/odom/raw` (`nav_msgs/msg/Odometry`): Estimativa de pose e twist da base (~25 Hz).
@@ -178,6 +189,30 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 
 ---
 
+### Post-Mortem 8: Pânico no Boot por Ponteiro Nulo no Transporte Serial Customizado
+* **Sintoma:** O ESP32 reiniciava em loop infinito com erro de pânico `Guru Meditation Error: Core 0 panic'ed (LoadProhibited)` no endereço `0x00000000` assim que o `micro_ros_task` tentava inicializar a comunicação.
+* **Causa Raiz:** A função `esp32_serial_open` faz cast de `transport->args` para `size_t*` e desreferencia `*uart_port`. No entanto, `initTransport` passava `(void*)uart_port` diretamente (isto é, o valor inteiro 0 foi convertido para ponteiro nulo), gerando falha de segmentação imediata ao acessar a memória 0.
+* **Solução:**
+  * Declaramos uma variável estática persistente `static size_t port = uart_port;` e passamos seu endereço `(void*)&port` para `rmw_uros_set_custom_transport`.
+
+---
+
+### Post-Mortem 9: Contaminação Binária na UART0 por Logs de Boot do ESP-IDF
+* **Sintoma:** O `micro_ros_agent` na Orange Pi não conseguia estabelecer sessão XRCE-DDS com o ESP32 e acusava perda de sincronismo serial ou recebia caracteres corrompidos (`€€€ €€...`).
+* **Causa Raiz:** A porta UART0 do ESP32 estava compartilhada com o console padrão do ESP-IDF (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y` a 115.200 bps). Como o micro-ROS opera na mesma porta UART0 a 921.600 bps binário, cada caractere ASCII de log emitido pelo kernel corrompia as mensagens XRCE-DDS.
+* **Solução:**
+  * Forçamos `CONFIG_ESP_CONSOLE_NONE=y` e `CONFIG_ESP_CONSOLE_UART_DEFAULT=n` em `sdkconfig.defaults` e regeramos o `sdkconfig`. O micro-ROS agora possui exclusividade total sobre a UART0.
+
+---
+
+### Post-Mortem 10: Incompatibilidade de QoS em Tópicos Crus (Best Effort vs Reliable)
+* **Sintoma:** O nó de odometria na Orange Pi recebia aviso do ROS 2 `New publisher discovered on topic '/wheel/ticks', offering incompatible QoS. No messages will be sent to it. Last incompatible policy: RELIABILITY_QOS_POLICY`.
+* **Causa Raiz:** O micro-ROS publica tópicos de alta frequência em perfil `BEST_EFFORT` para economizar memória e evitar retransmissões que travariam o buffer do microcontrolador. Assinantes padrão em `rclcpp` usam perfil `RELIABLE`, que recusam conexão com publicadores Best Effort.
+* **Solução:**
+  * Configuramos explicitamente a política de QoS do subscriber na Orange Pi para `rclcpp::QoS(10).best_effort().durability_volatile()`.
+
+---
+
 ## 4. Estado Atual do Sistema (Pronto para Uso)
 
 | Funcionalidade | Status | Arquivos Relevantes | Observações |
@@ -189,7 +224,9 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 | **Exportação de Mapa** | Funcionando | [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/icp_odometry_component.cpp#L500-L650) | Gera `.ply` (sem faces) e `.xyz` |
 | **Inferência NPU INT8** | Compilado e Validado | [`yolo_seg_node.cpp`](file:///home/alisson/orange/yolo_seg_ros2/src/yolo_seg_node.cpp) | Inferência a 4.8 ms na VIP9000 |
 | **Filtro Dinâmico** | Implementado (Inativo) | `enable_dynamic_filter: false` | Pronto para ligar via parâmetro |
-| **Base micro-ROS ESP32** | Funcionando em Tempo Real | [`main.cpp`](file:///home/alisson/orange/firmware/esp32_firmware/main/main.cpp) | `/odom/raw`, `/imu/data_raw`, `/joint_states`, `/cmd_vel` |
+| **Base micro-ROS ESP32** | Funcionando em Tempo Real (LEDC + PCNT + TWDT + Dado Cru) | [`main.cpp`](file:///home/alisson/orange/firmware/esp32_firmware/main/main.cpp) | 4 eixos LEDC pulsos reais, PCNT steps, IMU cru 50Hz, ticks 50Hz, watchdog 500ms |
+| **Nó Odometria Mecanum (Orange Pi)** | Funcionando (~45 Hz) | [`mecanum_wheel_odometry_node.cpp`](file:///home/alisson/orange/mecanum_wheel_odometry/src/mecanum_wheel_odometry_node.cpp) | Cinemática direta 4WD, RK2, sem TF, publica `/odom/wheel` |
+| **Fusão EKF + Madgwick (Orange Pi)** | Instalado e Operacional | `base_fusion.launch.py` | Gera `/odometry/filtered` e a única TF `odom -> base_link` |
 
 ---
 

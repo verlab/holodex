@@ -1,14 +1,10 @@
 #include "micro_ros_bridge.hpp"
 
 #include <string.h>
-#include "esp_timer.h"
 #include "esp_log.h"
-#include "driver/uart.h"
+#include "esp_timer.h"
 
-#include <rmw_microxrcedds_c/config.h>
 #include <rmw_microros/rmw_microros.h>
-#include <rmw_microros/time_sync.h>
-
 #include <rosidl_runtime_c/string_functions.h>
 #include <rosidl_runtime_c/primitives_sequence_functions.h>
 
@@ -16,10 +12,11 @@
 
 static const char* TAG = "MicroRosBridge";
 
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ ESP_LOGE(TAG, "Failed status on line %d: %d", __LINE__, (int)temp_rc); return false; }}
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ ESP_LOGW(TAG, "Soft check fail on line %d: %d", __LINE__, (int)temp_rc); }}
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "Falha micro-ROS na linha %d: %d", __LINE__, (int)temp_rc); return false;}}
 
 namespace holodex {
+
+MicroRosBridge* MicroRosBridge::s_instance_ = nullptr;
 
 MicroRosBridge& MicroRosBridge::getInstance()
 {
@@ -33,6 +30,8 @@ MicroRosBridge::MicroRosBridge()
       entities_created_(false),
       time_synchronized_(false)
 {
+    s_instance_ = this;
+
     memset(&allocator_, 0, sizeof(allocator_));
     memset(&support_, 0, sizeof(support_));
     memset(&node_, 0, sizeof(node_));
@@ -41,6 +40,7 @@ MicroRosBridge::MicroRosBridge()
     memset(&odom_pub_, 0, sizeof(odom_pub_));
     memset(&imu_pub_, 0, sizeof(imu_pub_));
     memset(&joint_state_pub_, 0, sizeof(joint_state_pub_));
+    memset(&wheel_ticks_pub_, 0, sizeof(wheel_ticks_pub_));
     memset(&stepper_status_pub_, 0, sizeof(stepper_status_pub_));
     memset(&heartbeat_pub_, 0, sizeof(heartbeat_pub_));
 
@@ -50,6 +50,7 @@ MicroRosBridge::MicroRosBridge()
     memset(&odom_msg_, 0, sizeof(odom_msg_));
     memset(&imu_msg_, 0, sizeof(imu_msg_));
     memset(&joint_state_msg_, 0, sizeof(joint_state_msg_));
+    memset(&wheel_ticks_msg_, 0, sizeof(wheel_ticks_msg_));
     memset(&stepper_status_msg_, 0, sizeof(stepper_status_msg_));
     memset(&heartbeat_msg_, 0, sizeof(heartbeat_msg_));
     memset(&cmd_vel_msg_, 0, sizeof(cmd_vel_msg_));
@@ -63,28 +64,21 @@ MicroRosBridge::~MicroRosBridge()
 
 bool MicroRosBridge::initTransport(size_t uart_port)
 {
-    ESP_LOGI(TAG, "Configurando transporte micro-ROS XRCE-DDS na UART%d (921,600 bps)...", (int)uart_port);
+    ESP_LOGI(TAG, "Configurando transporte serial micro-ROS customizado (UART %u)...", (unsigned int)uart_port);
 
-#if defined(RMW_UXRCE_TRANSPORT_CUSTOM)
     static size_t port = uart_port;
+    port = uart_port;
     rmw_uros_set_custom_transport(
         true,
-        (void *)&port,
+        (void*)&port,
         esp32_serial_open,
         esp32_serial_close,
         esp32_serial_write,
         esp32_serial_read
     );
-    return true;
-#else
-    ESP_LOGE(TAG, "RMW_UXRCE_TRANSPORT_CUSTOM nao configurado!");
-    return false;
-#endif
-}
 
-bool MicroRosBridge::pingAgent(uint32_t timeout_ms, uint8_t attempts)
-{
-    return (rmw_uros_ping_agent(timeout_ms, attempts) == RMW_RET_OK);
+    ESP_LOGI(TAG, "Transporte serial micro-XRCE-DDS configurado.");
+    return true;
 }
 
 bool MicroRosBridge::createEntities()
@@ -94,6 +88,7 @@ bool MicroRosBridge::createEntities()
     }
 
     ESP_LOGI(TAG, "Criando entidades micro-ROS...");
+
     allocator_ = rcl_get_default_allocator();
 
     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
@@ -127,7 +122,15 @@ bool MicroRosBridge::createEntities()
         "joint_states"
     ));
 
-    // 4. Publisher: /esp32/steppers/status (std_msgs/msg/Int32MultiArray)
+    // 4. Publisher: /wheel/ticks (std_msgs/msg/Int32MultiArray) (Seção 0.2)
+    RCCHECK(rclc_publisher_init_best_effort(
+        &wheel_ticks_pub_,
+        &node_,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
+        "wheel/ticks"
+    ));
+
+    // 5. Publisher: /esp32/steppers/status (std_msgs/msg/Int32MultiArray)
     RCCHECK(rclc_publisher_init_best_effort(
         &stepper_status_pub_,
         &node_,
@@ -135,7 +138,7 @@ bool MicroRosBridge::createEntities()
         "esp32/steppers/status"
     ));
 
-    // 5. Publisher: /esp32/heartbeat (std_msgs/msg/Int32)
+    // 6. Publisher: /esp32/heartbeat (std_msgs/msg/Int32)
     RCCHECK(rclc_publisher_init_best_effort(
         &heartbeat_pub_,
         &node_,
@@ -143,7 +146,7 @@ bool MicroRosBridge::createEntities()
         "esp32/heartbeat"
     ));
 
-    // 6. Subscriber: /cmd_vel (geometry_msgs/msg/Twist)
+    // 7. Subscriber: /cmd_vel (geometry_msgs/msg/Twist)
     RCCHECK(rclc_subscription_init_default(
         &cmd_vel_sub_,
         &node_,
@@ -151,7 +154,7 @@ bool MicroRosBridge::createEntities()
         "cmd_vel"
     ));
 
-    // 7. Subscriber: /esp32/led (std_msgs/msg/Bool)
+    // 8. Subscriber: /esp32/led (std_msgs/msg/Bool)
     RCCHECK(rclc_subscription_init_default(
         &led_sub_,
         &node_,
@@ -176,28 +179,27 @@ bool MicroRosBridge::createEntities()
         ON_NEW_DATA
     ));
 
-    // Pre-alocação e configuração estática de buffers de mensagens ROS 2
+    // Pré-alocação e configuração estática de buffers de mensagens ROS 2
     // A. Odometria
     rosidl_runtime_c__String__assign(&odom_msg_.header.frame_id, "odom");
     rosidl_runtime_c__String__assign(&odom_msg_.child_frame_id, "base_link");
-    // Diagonal de covariância (planar Mecanum)
     for (int i = 0; i < 36; ++i) {
         odom_msg_.pose.covariance[i] = 0.0;
         odom_msg_.twist.covariance[i] = 0.0;
     }
-    odom_msg_.pose.covariance[0] = 0.01;   // var(x)
-    odom_msg_.pose.covariance[7] = 0.01;   // var(y)
-    odom_msg_.pose.covariance[14] = 1e6;   // var(z) - planar
-    odom_msg_.pose.covariance[21] = 1e6;   // var(roll)
-    odom_msg_.pose.covariance[28] = 1e6;   // var(pitch)
-    odom_msg_.pose.covariance[35] = 0.05;  // var(yaw)
+    odom_msg_.pose.covariance[0] = 0.01;
+    odom_msg_.pose.covariance[7] = 0.01;
+    odom_msg_.pose.covariance[14] = 1e6;
+    odom_msg_.pose.covariance[21] = 1e6;
+    odom_msg_.pose.covariance[28] = 1e6;
+    odom_msg_.pose.covariance[35] = 0.05;
 
-    odom_msg_.twist.covariance[0] = 0.01;   // var(vx)
-    odom_msg_.twist.covariance[7] = 0.01;   // var(vy)
-    odom_msg_.twist.covariance[14] = 1e6;   // var(vz)
-    odom_msg_.twist.covariance[21] = 1e6;   // var(vroll)
-    odom_msg_.twist.covariance[28] = 1e6;   // var(vpitch)
-    odom_msg_.twist.covariance[35] = 0.05;  // var(vyaw)
+    odom_msg_.twist.covariance[0] = 0.01;
+    odom_msg_.twist.covariance[7] = 0.01;
+    odom_msg_.twist.covariance[14] = 1e6;
+    odom_msg_.twist.covariance[21] = 1e6;
+    odom_msg_.twist.covariance[28] = 1e6;
+    odom_msg_.twist.covariance[35] = 0.05;
 
     // B. IMU
     rosidl_runtime_c__String__assign(&imu_msg_.header.frame_id, "imu_link");
@@ -206,9 +208,8 @@ bool MicroRosBridge::createEntities()
         imu_msg_.angular_velocity_covariance[i] = 0.0;
         imu_msg_.linear_acceleration_covariance[i] = 0.0;
     }
-    imu_msg_.orientation_covariance[0] = 0.01;
-    imu_msg_.orientation_covariance[4] = 0.01;
-    imu_msg_.orientation_covariance[8] = 0.05;
+    // Convenção padrão ROS: orientation_covariance[0] = -1.0 indica que o sensor não estima orientação
+    imu_msg_.orientation_covariance[0] = -1.0;
 
     imu_msg_.angular_velocity_covariance[0] = 0.001;
     imu_msg_.angular_velocity_covariance[4] = 0.001;
@@ -232,8 +233,13 @@ bool MicroRosBridge::createEntities()
     joint_state_msg_.effort.capacity = 0;
     joint_state_msg_.effort.data = nullptr;
 
-    // D. Stepper Status (8 canais: 4 posições + 4 velocidades)
+    // D. Wheel Ticks (4 contadores inteiros acumulados + timestamp da amostra em us, 32 bits)
+    rosidl_runtime_c__int32__Sequence__init(&wheel_ticks_msg_.data, 5);
+    wheel_ticks_msg_.data.size = 5;
+
+    // E. Stepper Status (8 canais: 4 posições + 4 velocidades)
     rosidl_runtime_c__int32__Sequence__init(&stepper_status_msg_.data, 8);
+    stepper_status_msg_.data.size = 8;
 
     entities_created_ = true;
     ESP_LOGI(TAG, "Todas as entidades e topicos micro-ROS foram criados com sucesso!");
@@ -262,21 +268,30 @@ void MicroRosBridge::destroyEntities()
     rosidl_runtime_c__double__Sequence__fini(&joint_state_msg_.position);
     rosidl_runtime_c__double__Sequence__fini(&joint_state_msg_.velocity);
 
+    rosidl_runtime_c__int32__Sequence__fini(&wheel_ticks_msg_.data);
     rosidl_runtime_c__int32__Sequence__fini(&stepper_status_msg_.data);
 
     // Finalização das entidades rcl
-    (void) rcl_publisher_fini(&odom_pub_, &node_);
-    (void) rcl_publisher_fini(&imu_pub_, &node_);
-    (void) rcl_publisher_fini(&joint_state_pub_, &node_);
-    (void) rcl_publisher_fini(&stepper_status_pub_, &node_);
-    (void) rcl_publisher_fini(&heartbeat_pub_, &node_);
+    rcl_ret_t rc_fini = RCL_RET_OK;
+    rc_fini = rcl_publisher_fini(&odom_pub_, &node_); (void)rc_fini;
+    rc_fini = rcl_publisher_fini(&imu_pub_, &node_); (void)rc_fini;
+    rc_fini = rcl_publisher_fini(&joint_state_pub_, &node_); (void)rc_fini;
+    rc_fini = rcl_publisher_fini(&wheel_ticks_pub_, &node_); (void)rc_fini;
+    rc_fini = rcl_publisher_fini(&stepper_status_pub_, &node_); (void)rc_fini;
+    rc_fini = rcl_publisher_fini(&heartbeat_pub_, &node_); (void)rc_fini;
 
-    (void) rcl_subscription_fini(&cmd_vel_sub_, &node_);
-    (void) rcl_subscription_fini(&led_sub_, &node_);
+    rc_fini = rcl_subscription_fini(&cmd_vel_sub_, &node_); (void)rc_fini;
+    rc_fini = rcl_subscription_fini(&led_sub_, &node_); (void)rc_fini;
 
-    (void) rclc_executor_fini(&executor_);
-    (void) rcl_node_fini(&node_);
-    (void) rclc_support_fini(&support_);
+    rc_fini = rclc_executor_fini(&executor_); (void)rc_fini;
+    rc_fini = rcl_node_fini(&node_); (void)rc_fini;
+    rc_fini = rclc_support_fini(&support_); (void)rc_fini;
+
+    memset(&odom_msg_, 0, sizeof(odom_msg_));
+    memset(&imu_msg_, 0, sizeof(imu_msg_));
+    memset(&joint_state_msg_, 0, sizeof(joint_state_msg_));
+    memset(&wheel_ticks_msg_, 0, sizeof(wheel_ticks_msg_));
+    memset(&stepper_status_msg_, 0, sizeof(stepper_status_msg_));
 
     entities_created_ = false;
     time_synchronized_ = false;
@@ -285,7 +300,13 @@ void MicroRosBridge::destroyEntities()
 void MicroRosBridge::spinSome(uint32_t timeout_ms)
 {
     if (!entities_created_) return;
-    rclc_executor_spin_some(&executor_, RCL_MS_TO_NS(timeout_ms));
+    rclc_executor_spin_some(&executor_, timeout_ms * 1000000ULL);
+}
+
+bool MicroRosBridge::pingAgent(uint32_t timeout_ms, uint8_t attempts)
+{
+    rmw_ret_t ret = rmw_uros_ping_agent(timeout_ms, attempts);
+    return (ret == RMW_RET_OK);
 }
 
 bool MicroRosBridge::syncTime(uint32_t timeout_ms)
@@ -296,23 +317,33 @@ bool MicroRosBridge::syncTime(uint32_t timeout_ms)
     return time_synchronized_;
 }
 
-void MicroRosBridge::fillTimestamp(builtin_interfaces__msg__Time& stamp)
+void MicroRosBridge::fillTimestamp(builtin_interfaces__msg__Time& stamp, int64_t sample_timestamp_us)
 {
+    int64_t now_us = esp_timer_get_time();
     int64_t time_ns = 0;
+
     if (time_synchronized_ && rmw_uros_epoch_synchronized()) {
-        time_ns = rmw_uros_epoch_nanos();
+        int64_t epoch_now_ns = rmw_uros_epoch_nanos();
+        if (sample_timestamp_us > 0 && sample_timestamp_us <= now_us) {
+            int64_t age_ns = (now_us - sample_timestamp_us) * 1000LL;
+            time_ns = epoch_now_ns - age_ns;
+        } else {
+            time_ns = epoch_now_ns;
+        }
     } else {
-        time_ns = esp_timer_get_time() * 1000LL;
+        int64_t target_us = (sample_timestamp_us > 0) ? sample_timestamp_us : now_us;
+        time_ns = target_us * 1000LL;
     }
+
     stamp.sec = (int32_t)(time_ns / 1000000000LL);
     stamp.nanosec = (uint32_t)(time_ns % 1000000000LL);
 }
 
-bool MicroRosBridge::publishOdometry(const OdomState& state)
+bool MicroRosBridge::publishOdometry(const OdomState& state, int64_t sample_timestamp_us)
 {
     if (!entities_created_) return false;
 
-    fillTimestamp(odom_msg_.header.stamp);
+    fillTimestamp(odom_msg_.header.stamp, sample_timestamp_us);
 
     odom_msg_.pose.pose.position.x = state.x;
     odom_msg_.pose.pose.position.y = state.y;
@@ -333,11 +364,11 @@ bool MicroRosBridge::publishOdometry(const OdomState& state)
     return (rcl_publish(&odom_pub_, &odom_msg_, NULL) == RCL_RET_OK);
 }
 
-bool MicroRosBridge::publishImu(const ImuState& state)
+bool MicroRosBridge::publishImu(const ImuState& state, int64_t sample_timestamp_us)
 {
     if (!entities_created_) return false;
 
-    fillTimestamp(imu_msg_.header.stamp);
+    fillTimestamp(imu_msg_.header.stamp, sample_timestamp_us);
 
     imu_msg_.orientation.x = state.qx;
     imu_msg_.orientation.y = state.qy;
@@ -355,11 +386,11 @@ bool MicroRosBridge::publishImu(const ImuState& state)
     return (rcl_publish(&imu_pub_, &imu_msg_, NULL) == RCL_RET_OK);
 }
 
-bool MicroRosBridge::publishJointStates(const WheelPositions& positions, const WheelVelocities& velocities)
+bool MicroRosBridge::publishJointStates(const WheelPositions& positions, const WheelVelocities& velocities, int64_t sample_timestamp_us)
 {
     if (!entities_created_) return false;
 
-    fillTimestamp(joint_state_msg_.header.stamp);
+    fillTimestamp(joint_state_msg_.header.stamp, sample_timestamp_us);
 
     joint_state_msg_.position.data[0] = positions.fl;
     joint_state_msg_.position.data[1] = positions.fr;
@@ -372,6 +403,19 @@ bool MicroRosBridge::publishJointStates(const WheelPositions& positions, const W
     joint_state_msg_.velocity.data[3] = velocities.rr;
 
     return (rcl_publish(&joint_state_pub_, &joint_state_msg_, NULL) == RCL_RET_OK);
+}
+
+bool MicroRosBridge::publishWheelTicks(const EncoderTicks& ticks, int64_t sample_timestamp_us)
+{
+    if (!entities_created_) return false;
+
+    wheel_ticks_msg_.data.data[0] = ticks.fl;
+    wheel_ticks_msg_.data.data[1] = ticks.fr;
+    wheel_ticks_msg_.data.data[2] = ticks.rl;
+    wheel_ticks_msg_.data.data[3] = ticks.rr;
+    wheel_ticks_msg_.data.data[4] = (int32_t)(uint32_t)(sample_timestamp_us & 0xFFFFFFFFLL);
+
+    return (rcl_publish(&wheel_ticks_pub_, &wheel_ticks_msg_, NULL) == RCL_RET_OK);
 }
 
 bool MicroRosBridge::publishStepperStatus(const StepperGroupStatus& status)
@@ -394,7 +438,6 @@ bool MicroRosBridge::publishStepperStatus(const StepperGroupStatus& status)
 bool MicroRosBridge::publishHeartbeat(int32_t counter)
 {
     if (!entities_created_) return false;
-
     heartbeat_msg_.data = counter;
     return (rcl_publish(&heartbeat_pub_, &heartbeat_msg_, NULL) == RCL_RET_OK);
 }
@@ -402,21 +445,17 @@ bool MicroRosBridge::publishHeartbeat(int32_t counter)
 void MicroRosBridge::cmdVelCallback(const void* msgin)
 {
     const geometry_msgs__msg__Twist* msg = (const geometry_msgs__msg__Twist*)msgin;
-    if (msg != nullptr && getInstance().twist_cb_ != nullptr) {
-        TwistCommand cmd(
-            (float)msg->linear.x,
-            (float)msg->linear.y,
-            (float)msg->angular.z
-        );
-        getInstance().twist_cb_(cmd);
+    if (s_instance_ && s_instance_->twist_cb_) {
+        TwistCommand cmd(msg->linear.x, msg->linear.y, msg->angular.z);
+        s_instance_->twist_cb_(cmd);
     }
 }
 
 void MicroRosBridge::ledCallback(const void* msgin)
 {
     const std_msgs__msg__Bool* msg = (const std_msgs__msg__Bool*)msgin;
-    if (msg != nullptr && getInstance().led_cb_ != nullptr) {
-        getInstance().led_cb_(msg->data);
+    if (s_instance_ && s_instance_->led_cb_) {
+        s_instance_->led_cb_(msg->data);
     }
 }
 

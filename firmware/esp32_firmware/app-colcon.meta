@@ -2,7 +2,14 @@
     "names": {
         "microxrcedds_client": {
             "cmake-args": [
-                "-DUCLIENT_CUSTOM_TRANSPORT_MTU=1024"
+                "-DUCLIENT_PIC=OFF",
+                "-DUCLIENT_PROFILE_DISCOVERY=OFF",
+                "-DUCLIENT_PROFILE_UDP=OFF",
+                "-DUCLIENT_PROFILE_CUSTOM_TRANSPORT=ON",
+                "-DUCLIENT_PROFILE_SERIAL=OFF",
+                "-DUCLIENT_PROFILE_TCP=OFF",
+                "-DUCLIENT_CUSTOM_TRANSPORT_MTU=1024",
+                "-DUCLIENT_MIN_HEARTBEAT_TIME_INTERVAL=1"
             ]
         },
         "rmw_microxrcedds": {

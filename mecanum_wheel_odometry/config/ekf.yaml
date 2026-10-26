@@ -1,0 +1,44 @@
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # O EKF é a ÚNICA fonte de TF odom -> base_link no sistema
+    publish_tf: true
+
+    # 1. Odometria das rodas Mecanum (/odom/wheel)
+    # Fusão de velocidades planares (vx, vy) e velocidade angular (wz)
+    odom0: /odom/wheel
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_nodelay: true
+    odom0_differential: false
+    odom0_relative: false
+
+    # 2. Sensor inercial filtrado (/imu/data de imu_filter_madgwick)
+    # Fusão de orientação (yaw) e velocidade angular (wz)
+    imu0: /imu/data
+    imu0_config: [false, false, false,
+                  false, false, true,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_nodelay: true
+    imu0_differential: false
+    imu0_relative: true
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true
