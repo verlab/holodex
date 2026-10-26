@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_err.h"
+#include "esp_system.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
@@ -144,6 +145,7 @@ void micro_ros_task(void * arg)
     } agent_state_t;
 
     agent_state_t state = WAITING_AGENT;
+    int failed_pings = 0;
 
     while (1) {
         switch (state) {
@@ -162,6 +164,7 @@ void micro_ros_task(void * arg)
             case AGENT_AVAILABLE:
                 if (create_entities()) {
                     state = AGENT_CONNECTED;
+                    failed_pings = 0;
                     // Double pulse to indicate successful connection
                     gpio_set_level(LED_PIN, 1);
                     vTaskDelay(pdMS_TO_TICKS(150));
@@ -180,18 +183,23 @@ void micro_ros_task(void * arg)
                 // Spin executor
                 rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
 
-                // Check agent status
-                if (rmw_uros_ping_agent(100, 2) != RMW_RET_OK) {
-                    state = AGENT_DISCONNECTED;
+                // Check agent status (require 5 consecutive failed pings before declaring disconnected)
+                if (rmw_uros_ping_agent(100, 1) != RMW_RET_OK) {
+                    failed_pings++;
+                    if (failed_pings >= 5) {
+                        state = AGENT_DISCONNECTED;
+                    }
+                } else {
+                    failed_pings = 0;
                 }
                 vTaskDelay(pdMS_TO_TICKS(10));
                 break;
 
             case AGENT_DISCONNECTED:
-                destroy_entities();
                 led_override = false;
                 gpio_set_level(LED_PIN, 0);
-                state = WAITING_AGENT;
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
                 break;
         }
     }

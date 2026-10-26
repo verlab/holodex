@@ -81,16 +81,29 @@ O pacote foi desenhado para contornar o maior gargalo de odometria 3D em ARM emb
 
 ---
 
-### 2.4. Pacote `esp32_firmware` (micro-ROS para Controle de Base)
+### 2.4. Pacote `esp32_firmware` (micro-ROS para Controle de Base Mecanum)
 
 * **Hardware Target:** ESP32-WROOM-32 (DevKit v1) via USB Serial (conversor Silicon Labs CP2102 onboard), preparado para migração futura ao **ESP32-P4**.
-* **Framework:** **ESP-IDF v5.1 / v5.2** utilizando o componente `micro_ros_espidf_component` (branch `humble`).
-* **Transporte:** Serial XRCE-DDS customizado (`esp32_serial_transport.c`) operando na UART0 a **921,600 bps**.
+* **Framework:** **ESP-IDF v5.2** utilizando o componente `micro_ros_espidf_component` (branch `humble`).
+* **Transporte:** Serial XRCE-DDS customizado (`esp32_serial_transport.c`) operando na UART0 a **921,600 bps** com MTU customizado de **1024 bytes** (necessário para pacotes grandes como `nav_msgs/msg/Odometry`).
 * **Isolamento de Console:** Console de log do ESP-IDF desativado na UART0 (`CONFIG_ESP_CONSOLE_NONE=y`) para evitar contaminação do canal binário de micro-ROS com mensagens ASCII de boot/debug.
-* **Topologia de Tópicos:**
-  * `/esp32/heartbeat` (`std_msgs/msg/Int32`): Contador heartbeat a 1 Hz com auto-reconexão no client.
-  * `/esp32/led` (`std_msgs/msg/Bool`): Controle remoto do LED de status (GPIO 2).
-* **Execução na Orange Pi:** Nó `micro_ros_agent` em C++ lançado via `micro_ros_agent.launch.py` (ou `ros2 launch`). Porta configurada por padrão para `/dev/esp32` (via regra udev) ou `/dev/ttyUSB0`.
+* **Arquitetura de Classes (C++ Modular):**
+  * [`MicroRosBridge`](file:///home/alisson/orange/firmware/esp32_firmware/main/micro_ros_bridge.hpp): Gerencia publicadores, subscritores e buffers estáticos de mensagens ROS 2 com sincronização de relógio epoch via `rmw_uros_sync_session`.
+  * [`MecanumKinematics`](file:///home/alisson/orange/firmware/esp32_firmware/main/mecanum_kinematics.hpp): Cinemática inversa ($v_x, v_y, \omega_z \to \omega_i$), direta e integrador de odometria para base 4WD Mecanum.
+  * [`StepperInterface`](file:///home/alisson/orange/firmware/esp32_firmware/main/stepper_interface.hpp): Abstração de controle dos 4 motores de passo (FastAccelStepper).
+  * [`EncoderInterface`](file:///home/alisson/orange/firmware/esp32_firmware/main/encoder_interface.hpp): Abstração dos encoders de quadratura com cálculo de velocidades angulares em rad/s.
+  * [`ImuInterface`](file:///home/alisson/orange/firmware/esp32_firmware/main/imu_interface.hpp): Abstração da IMU 6-DoF/9-DoF com estimativa de orientação por quatérnion.
+* **Topologia de Tópicos Ativos:**
+  * **Publicadores (ESP32 $\to$ Orange Pi):**
+    * `/odom/raw` (`nav_msgs/msg/Odometry`): Estimativa de pose e twist da base (~25 Hz).
+    * `/imu/data_raw` (`sensor_msgs/msg/Imu`): Orientação, velocidade angular e aceleração linear com covariâncias (~25 Hz).
+    * `/joint_states` (`sensor_msgs/msg/JointState`): Posição e velocidade angular das 4 rodas Mecanum (~17 Hz).
+    * `/esp32/steppers/status` (`std_msgs/msg/Int32MultiArray`): Posição em passos e velocidades atuais dos 4 motores (~10 Hz).
+    * `/esp32/heartbeat` (`std_msgs/msg/Int32`): Heartbeat de conectividade a 1.000 Hz.
+  * **Inscritos (Orange Pi $\to$ ESP32):**
+    * `/cmd_vel` (`geometry_msgs/msg/Twist`): Comandos de velocidade linear e rotação com watchdog de segurança (500 ms timeout).
+    * `/esp32/led` (`std_msgs/msg/Bool`): Controle remoto do LED de status (GPIO 2).
+* **Execução na Orange Pi:** Nó `micro_ros_agent` em C++ lançado via `micro_ros_agent.launch.py`. Porta configurada para `/dev/esp32` (via regra udev) ou `/dev/ttyUSB0`.
 
 ---
 
@@ -155,6 +168,16 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 
 ---
 
+### Post-Mortem 7: Queda Silenciosa de Mensagens Maiores que 512 Bytes (O Caso da Odometria 6x6)
+* **Sintoma:** Ao habilitar a publicação de `/odom/raw`, tópicos como `/esp32/heartbeat`, `/imu/data_raw` e `/joint_states` publicavam normalmente, mas `/odom/raw` nunca entregava dados no `ros2 topic echo`, sem disparar erro no agente.
+* **Causa Raiz:** O micro-XRCE-DDS Client vinha configurado por padrão com `UXR_CONFIG_CUSTOM_TRANSPORT_MTU = 512` bytes. Como a mensagem `nav_msgs/msg/Odometry` possui duas matrizes de covariância $6 \times 6$ em `double` (36 doubles para pose + 36 doubles para twist = 576 bytes só em números flutuantes) somadas a cabeçalhos, strings e poses, seu tamanho serializado atinge ~720 bytes. Streams `BEST_EFFORT` no XRCE-DDS não suportam fragmentação e descartam silenciosamente qualquer pacote que exceda o MTU do transporte.
+* **Solução:**
+  1. Adicionamos `-DUCLIENT_CUSTOM_TRANSPORT_MTU=1024` no arquivo [`app-colcon.meta`](file:///home/alisson/orange/firmware/esp32_firmware/app-colcon.meta).
+  2. Desabilitamos o perfil de UDP no build do `microxrcedds_client` para permitir compilação limpa do transporte customizado.
+  3. Reempacotamos a biblioteca `libmicroros.a` com MTU de 1024 bytes e buffer de saída de 4096 bytes. `/odom/raw` passou a publicar continuamente a 25 Hz.
+
+---
+
 ## 4. Estado Atual do Sistema (Pronto para Uso)
 
 | Funcionalidade | Status | Arquivos Relevantes | Observações |
@@ -166,6 +189,7 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 | **Exportação de Mapa** | Funcionando | [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/icp_odometry_component.cpp#L500-L650) | Gera `.ply` (sem faces) e `.xyz` |
 | **Inferência NPU INT8** | Compilado e Validado | [`yolo_seg_node.cpp`](file:///home/alisson/orange/yolo_seg_ros2/src/yolo_seg_node.cpp) | Inferência a 4.8 ms na VIP9000 |
 | **Filtro Dinâmico** | Implementado (Inativo) | `enable_dynamic_filter: false` | Pronto para ligar via parâmetro |
+| **Base micro-ROS ESP32** | Funcionando em Tempo Real | [`main.cpp`](file:///home/alisson/orange/firmware/esp32_firmware/main/main.cpp) | `/odom/raw`, `/imu/data_raw`, `/joint_states`, `/cmd_vel` |
 
 ---
 
