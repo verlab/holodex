@@ -213,6 +213,38 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 
 ---
 
+### Post-Mortem 11: Tipagem Estrita de Dimensões em Inteiros no Nav2 Costmap (width e height)
+* **Sintoma:** Ao ativar o Nav2, os nós `controller_server` e `planner_server` sofriam terminação imediata com código de saída `-6` (SIGABRT): `rclcpp::exceptions::InvalidParameterTypeException: parameter 'height' has invalid type: Wrong parameter type, parameter {height} is of type {integer}, setting it to {double} is not allowed.`
+* **Causa Raiz:** No ROS 2 Humble, o plugin `nav2_costmap_2d` declara os parâmetros de dimensão geométrica `width` e `height` estritamente como inteiros em metros. Notações decimais no YAML (`width: 3.5` ou `15.0`) violam a tipagem estrita da biblioteca.
+* **Solução:**
+  * Ajustamos os parâmetros para inteiros explícitos no [`nav2_params.yaml`](file:///home/alisson/orange/holodex_bringup/config/nav2_params.yaml): `width: 4`, `height: 4` no `local_costmap` e `width: 15`, `height: 15` no `global_costmap`.
+
+---
+
+### Post-Mortem 12: Incompatibilidade do Tópico de Chute Inicial (/odom_combined vs /odometry/filtered)
+* **Sintoma:** O solver do `small_gicp` não recebia chutes iniciais de odometria de rodas durante rotações rápidas, operando como tracking desacoplado.
+* **Causa Raiz:** O componente de odometria ICP assinava `/odom_combined` por padrão, enquanto o filtro EKF do robô publica em `/odometry/filtered`.
+* **Solução:**
+  * Alinhamos o tópico padrão para `/odometry/filtered` no código C++ e no arquivo de parâmetros, e ativamos `use_tf_extrinsic: true` para compensação de braço de alavanca.
+
+---
+
+### Post-Mortem 13: Namespace Mismatch de Parâmetros do Motion Supervisor
+* **Sintoma:** O nó `holodex_motion_supervisor` iniciava sempre com parâmetros default (ex: limiares conservadores) ignorando as configurações do `supervisor.yaml`.
+* **Causa Raiz:** O arquivo `supervisor.yaml` continha a chave raiz `motion_supervisor:`, enquanto o executável e os launch files nomeavam o nó como `holodex_motion_supervisor`. No ROS 2 Humble, nós não aninhados sob o mesmo nome ignoram o bloco de parâmetros.
+* **Solução:**
+  * Atualizamos a chave de configuração para `holodex_motion_supervisor: ros__parameters:`.
+
+---
+
+### Post-Mortem 14: Jitter Temporal e Descarte de Pacotes Fora de Ordem em Odometria de Rodas
+* **Sintoma:** Ocorrência de avisos espúrios `Delta t elevado (4294.9s). Reiniciando base de tempo.` no nó de odometria de rodas quando ocorria jitter serial.
+* **Causa Raiz:** A subtração do timestamp em microssegundos do ESP32 era realizada com tipos `uint32_t`. Um pacote que chegasse com timestamp minimamente inferior (fora de ordem em microssegundos) resultava em underflow unsigned (~$4.294\text{ s}$), disparando a reinicialização da base temporal.
+* **Solução:**
+  * Convertemos o cálculo da diferença para signed de 32 bits: `const int32_t dt_signed_us = static_cast<int32_t>(sample_us - last_sample_us_);`. Se `dt_signed_us <= 0`, o pacote é categorizado como duplicado/fora de ordem e descartado silenciosamente sem corromper o integrador de odometria.
+
+---
+
 ## 4. Estado Atual do Sistema (Pronto para Uso)
 
 | Funcionalidade | Status | Arquivos Relevantes | Observações |
@@ -222,11 +254,16 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 | **Odometria VGICP** | Funcionando (~30 Hz) | [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/icp_odometry_component.cpp) | Submapa estável na RAM |
 | **Throughput Monitor** | Funcionando | [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/icp_odometry_component.cpp#L363-L387) | Mede e loga vazão real em msg/s |
 | **Exportação de Mapa** | Funcionando | [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/icp_odometry_component.cpp#L500-L650) | Gera `.ply` (sem faces) e `.xyz` |
-| **Inferência NPU INT8** | Compilado e Validado | [`yolo_seg_node.cpp`](file:///home/alisson/orange/yolo_seg_ros2/src/yolo_seg_node.cpp) | Inferência a 4.8 ms na VIP9000 |
-| **Filtro Dinâmico** | Implementado (Inativo) | `enable_dynamic_filter: false` | Pronto para ligar via parâmetro |
+| **Inferência NPU INT8** | Operacional (~25 Hz Contínuo) | [`yolo_seg_node.cpp`](file:///home/alisson/orange/yolo_seg_ros2/src/yolo_seg_node.cpp) | Inferência a 4.8 ms na VIP9000, publica `/yolo/dynamic_mask` (mono8) |
+| **Filtro Dinâmico** | Implementado e Integrado | [`pointcloud_filter_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/pointcloud_filter_component.cpp) | Rejeita pontos mapeados na máscara de classes dinâmicas (humanos/veículos) |
 | **Base micro-ROS ESP32** | Funcionando em Tempo Real (LEDC + PCNT + TWDT + Dado Cru) | [`main.cpp`](file:///home/alisson/orange/firmware/esp32_firmware/main/main.cpp) | 4 eixos LEDC pulsos reais, PCNT steps, IMU cru 50Hz, ticks 50Hz, watchdog 500ms |
 | **Nó Odometria Mecanum (Orange Pi)** | Funcionando (~45 Hz) | [`mecanum_wheel_odometry_node.cpp`](file:///home/alisson/orange/mecanum_wheel_odometry/src/mecanum_wheel_odometry_node.cpp) | Cinemática direta 4WD, RK2, sem TF, publica `/odom/wheel` |
 | **Fusão EKF + Madgwick (Orange Pi)** | Instalado e Operacional | `base_fusion.launch.py` | Gera `/odometry/filtered` e a única TF `odom -> base_link` |
+| **Orquestrador Central & Benchmark** | Funcionando | [`holodex_orchestrator.py`](file:///home/alisson/orange/holodex_bringup/scripts/holodex_orchestrator.py) | Dashboard TUI, telemetria ao vivo, CPU big.LITTLE, shutdown seguro |
+| **URDF e Árvore TF Unificada** | Funcionando | [`holodex.urdf`](file:///home/alisson/orange/holodex_bringup/urdf/holodex.urdf) | `base_footprint -> base_link -> camera_link`, `imu_link`, 4 rodas |
+| **Submapa 3D como Tópico** | Funcionando (~1 Hz / Keyframe) | [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud_odometry/src/icp_odometry_component.cpp) | Publica centros gaussianos em `/icp/submap_cloud` (frame `odom`) |
+| **Supervisor de Movimento** | Funcionando (20 Hz) | [`motion_supervisor.py`](file:///home/alisson/orange/holodex_bringup/holodex_bringup/motion_supervisor.py) | Intertravamento 360°, slip guard, jerk lim, /cmd_vel_nav -> /cmd_vel |
+| **Nav2 Holonômico Mecanum** | Instalado e Validado | [`navigation.launch.py`](file:///home/alisson/orange/holodex_bringup/launch/navigation.launch.py) | DWB Mecanum holonômico + SmacPlanner + Costmap 360° com submapa |
 
 ---
 

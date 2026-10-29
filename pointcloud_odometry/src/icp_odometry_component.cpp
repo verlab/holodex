@@ -22,7 +22,7 @@ IcpOdometryComponent::IcpOdometryComponent(const rclcpp::NodeOptions& options)
     // Parameters declaration
     input_cloud_topic_ = this->declare_parameter<std::string>("input_cloud_topic", "/camera/filtered_points");
     odom_topic_ = this->declare_parameter<std::string>("odom_topic", "/icp/odom");
-    initial_guess_topic_ = this->declare_parameter<std::string>("initial_guess_topic", "/odom_combined");
+    initial_guess_topic_ = this->declare_parameter<std::string>("initial_guess_topic", "/odometry/filtered");
     odom_frame_id_ = this->declare_parameter<std::string>("odom_frame_id", "odom");
     base_frame_id_ = this->declare_parameter<std::string>("base_frame_id", "base_link");
     publish_tf_ = this->declare_parameter<bool>("publish_tf", false); // RIGIDLY FALSE by default to avoid collision with robot_localization
@@ -35,10 +35,17 @@ IcpOdometryComponent::IcpOdometryComponent(const rclcpp::NodeOptions& options)
     max_corr_dist_ = this->declare_parameter<double>("max_corr_dist", 0.30);
     default_map_path_ = this->declare_parameter<std::string>("default_map_path", "/home/orangepi/submap_cloud.ply");
     save_on_shutdown_ = this->declare_parameter<bool>("save_on_shutdown", false);
+    publish_submap_cloud_ = this->declare_parameter<bool>("publish_submap_cloud", true);
+    submap_cloud_topic_ = this->declare_parameter<std::string>("submap_cloud_topic", "/icp/submap_cloud");
+    submap_publish_interval_sec_ = this->declare_parameter<double>("submap_publish_interval_sec", 1.0);
 
     // Communication setup
     rclcpp::SensorDataQoS sensor_qos;
     pub_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
+    pub_telemetry_ = this->create_publisher<std_msgs::msg::String>("/icp/telemetry", 10);
+    if (publish_submap_cloud_) {
+        pub_submap_cloud_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(submap_cloud_topic_, 10);
+    }
 
     sub_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
         input_cloud_topic_, sensor_qos,
@@ -51,6 +58,10 @@ IcpOdometryComponent::IcpOdometryComponent(const rclcpp::NodeOptions& options)
     // Services to export pointcloud map for scientific paper figures
     srv_save_map_ = this->create_service<std_srvs::srv::Trigger>(
         "/icp/save_map",
+        std::bind(&IcpOdometryComponent::handleSaveMap, this, std::placeholders::_1, std::placeholders::_2));
+
+    srv_save_submap_ = this->create_service<std_srvs::srv::Trigger>(
+        "/icp/save_submap",
         std::bind(&IcpOdometryComponent::handleSaveMap, this, std::placeholders::_1, std::placeholders::_2));
 
     srv_save_map_alias_ = this->create_service<std_srvs::srv::Trigger>(
@@ -216,6 +227,10 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
 
         publishOdometry(msg->header.stamp, current_pose_, Eigen::Matrix<double, 6, 6>::Identity() * 100.0,
                         Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+
+        if (publish_submap_cloud_) {
+            publishSubmapCloud(msg->header.stamp);
+        }
         return;
     }
 
@@ -345,9 +360,32 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
                 accumulated_map_points_.emplace_back(world_pt.x(), world_pt.y(), world_pt.z());
             }
 
+            // Otimização SWaP: Mantém a memória de pontos acumulados limitada (< 5 MB RAM)
+            // aplicando voxelgrid downsampling in-place a cada 80.000 pontos
+            if (accumulated_map_points_.size() > 80000) {
+                small_gicp::PointCloud raw_cloud;
+                raw_cloud.resize(accumulated_map_points_.size());
+                for (size_t i = 0; i < accumulated_map_points_.size(); ++i) {
+                    raw_cloud.points[i] = Eigen::Vector4d(accumulated_map_points_[i].x(), accumulated_map_points_[i].y(), accumulated_map_points_[i].z(), 1.0);
+                }
+                auto ds_cloud = small_gicp::voxelgrid_sampling_omp(raw_cloud, 0.05, num_threads_);
+                accumulated_map_points_.clear();
+                accumulated_map_points_.reserve(ds_cloud->size());
+                for (size_t i = 0; i < ds_cloud->size(); ++i) {
+                    accumulated_map_points_.emplace_back(ds_cloud->points[i].x(), ds_cloud->points[i].y(), ds_cloud->points[i].z());
+                }
+            }
+
             RCLCPP_INFO(this->get_logger(),
                 "[Keyframe #%zu] delta_d=%.3fm, delta_theta=%.1f deg, inliers=%.0f%% -> Submap Voxels=%zu",
                 keyframe_count_, delta_dist, delta_rot * 180.0 / M_PI, inlier_ratio * 100.0, submap_voxelmap_->size());
+
+            if (publish_submap_cloud_) {
+                rclcpp::Time current_time = msg->header.stamp;
+                if ((current_time - last_submap_pub_time_).seconds() >= submap_publish_interval_sec_) {
+                    publishSubmapCloud(current_time);
+                }
+            }
         }
     }
 
@@ -384,6 +422,19 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
         real_throughput_hz_, source_cloud->size(), result.num_inliers, inlier_pct, time_ms,
         current_pose_.translation().x(), current_pose_.translation().y(), current_pose_.translation().z(),
         roll_deg, pitch_deg, yaw_deg, submap_voxelmap_->size(), lost_tag.c_str());
+
+    if (pub_telemetry_) {
+        auto t_msg = std_msgs::msg::String();
+        t_msg.data = "state:" + std::string(tracking_state_ == TrackingState::LOST ? "TRACKING_LOST" : "TRACKING_OK") +
+                     ";inliers:" + std::to_string(result.num_inliers) +
+                     ";inlier_pct:" + std::to_string(inlier_pct) +
+                     ";points:" + std::to_string(source_cloud->size()) +
+                     ";submap_voxels:" + std::to_string(submap_voxelmap_->size()) +
+                     ";keyframes:" + std::to_string(keyframe_count_) +
+                     ";icp_ms:" + std::to_string(time_ms) +
+                     ";throughput_hz:" + std::to_string(real_throughput_hz_);
+        pub_telemetry_->publish(t_msg);
+    }
 }
 
 void IcpOdometryComponent::publishOdometry(const rclcpp::Time& stamp,
@@ -461,6 +512,53 @@ void IcpOdometryComponent::publishOdometry(const rclcpp::Time& stamp,
         tf_msg.transform.rotation.w = q.w();
         tf_broadcaster_->sendTransform(tf_msg);
     }
+}
+
+void IcpOdometryComponent::publishSubmapCloud(const rclcpp::Time& stamp) {
+    if (!submap_voxelmap_ || submap_voxelmap_->size() == 0 || !pub_submap_cloud_) {
+        return;
+    }
+
+    auto msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
+    msg->header.stamp = stamp;
+    msg->header.frame_id = odom_frame_id_;
+    msg->height = 1;
+    msg->is_bigendian = false;
+    msg->is_dense = true;
+
+    msg->fields.resize(3);
+    msg->fields[0].name = "x";
+    msg->fields[0].offset = 0;
+    msg->fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    msg->fields[0].count = 1;
+
+    msg->fields[1].name = "y";
+    msg->fields[1].offset = 4;
+    msg->fields[1].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    msg->fields[1].count = 1;
+
+    msg->fields[2].name = "z";
+    msg->fields[2].offset = 8;
+    msg->fields[2].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    msg->fields[2].count = 1;
+
+    msg->point_step = 12;
+
+    size_t num_voxels = submap_voxelmap_->flat_voxels.size();
+    msg->width = static_cast<uint32_t>(num_voxels);
+    msg->row_step = msg->point_step * msg->width;
+    msg->data.resize(msg->row_step);
+
+    float* data_ptr = reinterpret_cast<float*>(msg->data.data());
+    for (size_t i = 0; i < num_voxels; ++i) {
+        const Eigen::Vector4d& mean = submap_voxelmap_->flat_voxels[i]->second.mean;
+        data_ptr[i * 3 + 0] = static_cast<float>(mean.x());
+        data_ptr[i * 3 + 1] = static_cast<float>(mean.y());
+        data_ptr[i * 3 + 2] = static_cast<float>(mean.z());
+    }
+
+    last_submap_pub_time_ = stamp;
+    pub_submap_cloud_->publish(std::move(msg));
 }
 
 void IcpOdometryComponent::handleSaveMap(

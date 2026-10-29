@@ -1,0 +1,56 @@
+# ==============================================================================
+# Parametrização do Supervisor de Movimento (holodex_motion_supervisor)
+# Robô Holodex Orange - Mecanum 4WD
+# ==============================================================================
+
+holodex_motion_supervisor:
+  ros__parameters:
+    # Taxa de atualização do ciclo de supervisão e publicação de /cmd_vel (Hz)
+    update_frequency: 20.0
+
+    # Mapeamento de Tópicos
+    cmd_nav_topic: "/cmd_vel_nav"
+    cmd_teleop_topic: "/cmd_vel_teleop"
+    cmd_out_topic: "/cmd_vel"
+    odom_topic: "/odometry/filtered"
+    submap_topic: "/icp/submap_cloud"
+    frontal_cloud_topic: "/camera/filtered_points"
+    status_topic: "/motion_supervisor/status"
+
+    # Frames de Coordenadas TF2
+    base_frame: "base_link"
+    odom_frame: "odom"
+
+    # Timeouts de Watchdog de Comunicação (segundos)
+    cmd_nav_timeout: 0.5
+    teleop_timeout: 0.5
+
+    # Envelopes de Velocidade Máxima Absoluta
+    max_vel_x: 0.40          # Avanço longitudinal máximo (m/s)
+    min_vel_x: -0.30         # Recuo ré longitudinal máximo (m/s)
+    max_vel_y: 0.25          # Strafe lateral máximo (m/s)
+    max_vel_theta: 0.80      # Velocidade angular máxima (rad/s) (~45°/s)
+
+    # Rampas Suaves de Aceleração / Desaceleração
+    accel_lim_x: 0.60        # m/s^2
+    decel_lim_x: 1.20        # m/s^2
+    accel_lim_y: 0.40        # m/s^2
+    decel_lim_y: 0.80        # m/s^2
+    accel_lim_theta: 1.00    # rad/s^2
+    decel_lim_theta: 2.00    # rad/s^2
+
+    # Slip Guard & Controle de Tração Mecanum
+    enable_slip_guard: true
+    slip_transverse_damping: 0.85
+    max_transverse_jerk: 1.5 # m/s^3
+
+    # Dynamic Collision Interlock (Memória de Submapa 360° + Nuvem Frontal)
+    enable_collision_interlock: true
+    robot_half_length: 0.22        # Metade do comprimento do chassi (m)
+    robot_half_width: 0.22         # Metade da largura do chassi (m)
+    safety_margin: 0.12            # Margem lateral extra de segurança (m)
+    slowdown_distance: 0.45        # Distância onde inicia frenagem suave (m)
+    emergency_stop_distance: 0.20  # Distância de intertravamento e corte direcional (m)
+    lookahead_time: 0.6            # Projeção temporal (s)
+    height_min: 0.05               # Ignorar pontos no solo (z < 5cm)
+    height_max: 0.50               # Ignorar pontos acima do robô (z > 50cm)

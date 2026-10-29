@@ -1,0 +1,4 @@
+timestamp,temp_c,cpu_total_pct,cpu_little_a55_pct,cpu_big_a76_pct,ram_used_mb,hz_raw_cloud,hz_filt_cloud,hz_wheel_ticks,hz_ekf_odom,hz_icp_odom,cpu_icp_odometry,cpu_astra_camera,cpu_micro_ros_agent,cpu_ekf_node,cpu_mecanum_wheel_odometry
+1,43.276,5.9,1.0,20.7,288.8828125,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+2,42.47,1.5,1.4666666666666668,1.0,289.58984375,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+3,42.222,0.5,0.16666666666666666,1.9,289.58984375,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0

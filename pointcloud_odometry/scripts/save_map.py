@@ -7,11 +7,15 @@ from std_srvs.srv import Trigger
 def main():
     rclpy.init()
     node = Node('map_saver_cli')
-    client = node.create_client(Trigger, '/icp/save_map')
-    print("Aguardando servico /icp/save_map...")
-    if not client.wait_for_service(timeout_sec=5.0):
-        print("Erro: Servico /icp/save_map nao encontrado!")
-        sys.exit(1)
+    # Suporta tanto /icp/save_submap quanto o alias legado /icp/save_map
+    client = node.create_client(Trigger, '/icp/save_submap')
+    print("Aguardando servico /icp/save_submap...")
+    if not client.wait_for_service(timeout_sec=3.0):
+        client = node.create_client(Trigger, '/icp/save_map')
+        print("Tentando servico alternativo /icp/save_map...")
+        if not client.wait_for_service(timeout_sec=2.0):
+            print("Erro: Servico /icp/save_submap ou /icp/save_map nao encontrado!")
+            sys.exit(1)
 
     req = Trigger.Request()
     future = client.call_async(req)

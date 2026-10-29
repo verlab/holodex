@@ -82,7 +82,8 @@ class PipelineOrchestratorNode(Node):
             10
         )
 
-        self.save_map_client = self.create_client(Trigger, '/icp/save_map')
+        self.save_map_client = self.create_client(Trigger, '/icp/save_submap')
+        self.save_map_client_legacy = self.create_client(Trigger, '/icp/save_map')
 
     def raw_cb(self, msg):
         pts = msg.width * msg.height
@@ -107,15 +108,18 @@ class PipelineOrchestratorNode(Node):
         self.odom_tracker.hit()
 
     def call_save_map(self):
-        if not self.save_map_client.wait_for_service(timeout_sec=2.0):
-            return False, "Servico /icp/save_map nao disponivel no momento!"
+        client = self.save_map_client
+        if not client.wait_for_service(timeout_sec=1.0):
+            client = self.save_map_client_legacy
+            if not client.wait_for_service(timeout_sec=1.5):
+                return False, "Servico /icp/save_submap ou /icp/save_map nao disponivel no momento!"
         req = Trigger.Request()
-        future = self.save_map_client.call_async(req)
+        future = client.call_async(req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         if future.done():
             res = future.result()
             return res.success, res.message
-        return False, "Timeout ao chamar servico /icp/save_map"
+        return False, "Timeout ao chamar servico de salvar mapa"
 
 def main():
     import argparse
@@ -123,7 +127,29 @@ def main():
     parser.add_argument('--launch-all', action='store_true', help='Inicia automaticamente camera e pipeline')
     parser.add_argument('--headless', action='store_true', help='Modo nao-interativo')
     parser.add_argument('--save-map-now', action='store_true', help='Chama o servico de salvar mapa e sai')
-    args = parser.parse_args()
+    parser.add_argument('--robot', action='store_true', help='Executa o novo orquestrador central do robô completo (holodex_orchestrator)')
+    args, remaining = parser.parse_known_args()
+
+    if args.robot:
+        try:
+            # Repassa argumentos restantes para o orquestrador do robô
+            sys.argv = [sys.argv[0]] + remaining
+            from holodex_bringup.orchestrator import main as robot_main
+            robot_main()
+            return
+        except ImportError:
+            print("[AVISO] Pacote holodex_bringup não encontrado. Executando orquestrador local de pointcloud...")
+
+    # Pre-flight check: evita duplicação de processos se --launch-all for solicitado
+    if args.launch_all:
+        try:
+            check_out = subprocess.check_output("pgrep -fa 'icp_odometry' || true", shell=True, text=True).strip()
+            if check_out:
+                print(f"[AVISO] Processo de odometria já em execução:\n{check_out}")
+                print("[INFO] Reutilizando processo ativo sem lançar duplicatas.")
+                args.launch_all = False
+        except Exception:
+            pass
 
     rclpy.init()
     node = PipelineOrchestratorNode()

@@ -128,14 +128,17 @@ private:
 
         double dt;
         if (has_sample_time) {
-            const uint32_t dt_us = sample_us - last_sample_us_; // aritmética uint32: tolera wrap
-            dt = static_cast<double>(dt_us) * 1e-6;
+            const int32_t dt_signed_us = static_cast<int32_t>(sample_us - last_sample_us_);
+            if (dt_signed_us <= 0) {
+                return; // amostra repetida ou pacote fora de ordem descartado com seguranca
+            }
+            dt = static_cast<double>(dt_signed_us) * 1e-6;
         } else {
             dt = (now - last_time_).seconds();
         }
 
         if (dt <= 0.0) {
-            return; // amostra repetida ou fora de ordem
+            return; // amostra repetida
         }
         if (dt > 0.5) {
             // Salto temporal ou reinicialização da fonte (ex.: ESP32 reiniciou e os ticks zeraram)

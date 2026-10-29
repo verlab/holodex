@@ -31,7 +31,7 @@ def generate_launch_description():
 
     initial_guess_topic_arg = DeclareLaunchArgument(
         'initial_guess_topic',
-        default_value='/odom_combined',
+        default_value='/odometry/filtered',
         description='Topico de odometria do EKF/encoders para chute inicial'
     )
 

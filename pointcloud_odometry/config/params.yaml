@@ -14,11 +14,11 @@ icp_odometry_component:
   ros__parameters:
     input_cloud_topic: "/camera/filtered_points"
     odom_topic: "/icp/odom"
-    initial_guess_topic: "/odom_combined"
+    initial_guess_topic: "/odometry/filtered"
     odom_frame_id: "odom"
     base_frame_id: "base_link"
     publish_tf: false
-    use_tf_extrinsic: false
+    use_tf_extrinsic: true
     voxel_resolution: 0.15
     keyframe_delta_trans: 0.15
     keyframe_delta_rot_deg: 8.0
@@ -27,3 +27,6 @@ icp_odometry_component:
     max_corr_dist: 0.30
     default_map_path: "/home/orangepi/submap_cloud.ply"
     save_on_shutdown: false
+    publish_submap_cloud: true
+    submap_cloud_topic: "/icp/submap_cloud"
+    submap_publish_interval_sec: 1.0

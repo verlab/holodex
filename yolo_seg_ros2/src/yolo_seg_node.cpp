@@ -61,6 +61,27 @@ struct LetterboxInfo {
 // -------------------------------------------------------------
 // Funções Matemáticas Auxiliares
 // -------------------------------------------------------------
+inline bool is_dynamic_class(int class_id) {
+    // Classes COCO com movimento independente (humanos, veiculos e animais)
+    switch (class_id) {
+        case 0:  // person
+        case 1:  // bicycle
+        case 2:  // car
+        case 3:  // motorcycle
+        case 5:  // bus
+        case 7:  // truck
+        case 14: // bird
+        case 15: // cat
+        case 16: // dog
+        case 17: // horse
+        case 18: // sheep
+        case 19: // cow
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline float sigmoid(float x) {
     return 1.0f / (1.0f + std::exp(-x));
 }
@@ -487,12 +508,14 @@ class YoloSegRosNode : public rclcpp::Node {
 public:
     YoloSegRosNode(std::shared_ptr<VipLiteYoloSegEngine> engine,
                    const std::string& topic_name,
+                   const std::string& mask_topic,
                    const std::string& output_path,
                    float conf_th, float nms_th,
                    int warmup_frames,
                    bool single_frame)
         : Node("yolo_seg_node"),
           m_engine(engine),
+          m_mask_topic(mask_topic),
           m_output_path(output_path),
           m_conf_th(conf_th),
           m_nms_th(nms_th),
@@ -503,6 +526,13 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "Aguardando frames do topico ROS 2: %s (warmup: %d frames)",
                     topic_name.c_str(), warmup_frames);
+        RCLCPP_INFO(this->get_logger(), "Publicador de mascara dinamica ativado em: %s",
+                    mask_topic.c_str());
+
+        m_pub_mask = this->create_publisher<sensor_msgs::msg::Image>(
+            mask_topic, rclcpp::SensorDataQoS()
+        );
+
         m_sub = this->create_subscription<sensor_msgs::msg::Image>(
             topic_name,
             rclcpp::SensorDataQoS(),
@@ -571,33 +601,66 @@ private:
         double t_post = std::chrono::duration<double, std::milli>(t3 - t2).count();
         double t_total = std::chrono::duration<double, std::milli>(t3 - t0).count();
 
-        RCLCPP_INFO(this->get_logger(), "========================================");
-        RCLCPP_INFO(this->get_logger(), "INFERENCIA CONCLUIDA COM SUCESSO!");
-        RCLCPP_INFO(this->get_logger(), "  Pre-proc (Letterbox + Quant): %.2f ms", t_pre);
-        RCLCPP_INFO(this->get_logger(), "  NPU Inferencia (VIP9000):     %.2f ms", t_npu);
-        RCLCPP_INFO(this->get_logger(), "  Pos-proc (DFL, NMS, Mascaras): %.2f ms", t_post);
-        RCLCPP_INFO(this->get_logger(), "  Tempo Total:                  %.2f ms (%.1f FPS)", t_total, 1000.0 / t_total);
-        RCLCPP_INFO(this->get_logger(), "  Deteccoes encontradas:         %zu (conf >= %.2f)", detections.size(), m_conf_th);
-
-        if (detections.empty()) {
-            RCLCPP_INFO(this->get_logger(), "  (Maior confianca no frame: %s)", debug_top_candidate.c_str());
+        // 4. Construção da máscara binária para o filtro de odometria 3D
+        cv::Mat dynamic_mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+        int dynamic_count = 0;
+        for (const auto& det : detections) {
+            if (is_dynamic_class(det.class_id) && !det.mask.empty()) {
+                if (det.mask.size() == dynamic_mask.size()) {
+                    cv::bitwise_or(dynamic_mask, det.mask, dynamic_mask);
+                    dynamic_count++;
+                }
+            }
         }
 
-        for (size_t i = 0; i < detections.size(); ++i) {
-            const auto& det = detections[i];
-            std::string name = (det.class_id >= 0 && det.class_id < static_cast<int>(COCO_CLASSES.size()))
-                ? COCO_CLASSES[det.class_id] : ("Class_" + std::to_string(det.class_id));
-            RCLCPP_INFO(this->get_logger(), "    [%zu] %s (score: %.1f%%) em [%.0f, %.0f, %.0f, %.0f]",
-                        i + 1, name.c_str(), det.score * 100.0f,
-                        det.box.x, det.box.y, det.box.width, det.box.height);
+        // Garante dimensão 640x480 da Astra Pro
+        if (dynamic_mask.cols != 640 || dynamic_mask.rows != 480) {
+            cv::resize(dynamic_mask, dynamic_mask, cv::Size(640, 480), 0, 0, cv::INTER_NEAREST);
         }
 
-        if (cv::imwrite(m_output_path, annotated)) {
-            RCLCPP_INFO(this->get_logger(), "Imagem anotada salva em: %s", m_output_path.c_str());
+        // Publica máscara para o PointcloudFilterComponent
+        if (m_pub_mask) {
+            sensor_msgs::msg::Image::SharedPtr mask_msg =
+                cv_bridge::CvImage(msg->header, sensor_msgs::image_encodings::MONO8, dynamic_mask).toImageMsg();
+            m_pub_mask->publish(*mask_msg);
+        }
+
+        if (m_single_frame) {
+            RCLCPP_INFO(this->get_logger(), "========================================");
+            RCLCPP_INFO(this->get_logger(), "INFERENCIA CONCLUIDA COM SUCESSO!");
+            RCLCPP_INFO(this->get_logger(), "  Pre-proc (Letterbox + Quant): %.2f ms", t_pre);
+            RCLCPP_INFO(this->get_logger(), "  NPU Inferencia (VIP9000):     %.2f ms", t_npu);
+            RCLCPP_INFO(this->get_logger(), "  Pos-proc (DFL, NMS, Mascaras): %.2f ms", t_post);
+            RCLCPP_INFO(this->get_logger(), "  Tempo Total:                  %.2f ms (%.1f FPS)", t_total, 1000.0 / t_total);
+            RCLCPP_INFO(this->get_logger(), "  Deteccoes encontradas:         %zu (conf >= %.2f)", detections.size(), m_conf_th);
+
+            if (detections.empty()) {
+                RCLCPP_INFO(this->get_logger(), "  (Maior confianca no frame: %s)", debug_top_candidate.c_str());
+            }
+
+            for (size_t i = 0; i < detections.size(); ++i) {
+                const auto& det = detections[i];
+                std::string name = (det.class_id >= 0 && det.class_id < static_cast<int>(COCO_CLASSES.size()))
+                    ? COCO_CLASSES[det.class_id] : ("Class_" + std::to_string(det.class_id));
+                RCLCPP_INFO(this->get_logger(), "    [%zu] %s (score: %.1f%%) em [%.0f, %.0f, %.0f, %.0f]",
+                            i + 1, name.c_str(), det.score * 100.0f,
+                            det.box.x, det.box.y, det.box.width, det.box.height);
+            }
+
+            if (cv::imwrite(m_output_path, annotated)) {
+                RCLCPP_INFO(this->get_logger(), "Imagem anotada salva em: %s", m_output_path.c_str());
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "Falha ao gravar imagem em: %s", m_output_path.c_str());
+            }
+            RCLCPP_INFO(this->get_logger(), "========================================");
         } else {
-            RCLCPP_ERROR(this->get_logger(), "Falha ao gravar imagem em: %s", m_output_path.c_str());
+            // Em modo contínuo: log throttled a cada ~1s (30 frames) sem escrita em disco para economizar SWaP
+            if (m_frame_counter % 30 == 0) {
+                RCLCPP_INFO(this->get_logger(),
+                    "[YOLO VIP9000] Frame %d | NPU=%.1f ms | Total=%.1f ms (%.1f FPS) | Deteccoes=%zu | Dinamicos=%d",
+                    m_frame_counter, t_npu, t_total, 1000.0 / t_total, detections.size(), dynamic_count);
+            }
         }
-        RCLCPP_INFO(this->get_logger(), "========================================");
 
         m_processed_count++;
 
@@ -608,6 +671,7 @@ private:
     }
 
     std::shared_ptr<VipLiteYoloSegEngine> m_engine;
+    std::string m_mask_topic;
     std::string m_output_path;
     float m_conf_th;
     float m_nms_th;
@@ -615,6 +679,7 @@ private:
     bool m_single_frame;
     int m_frame_counter;
     int m_processed_count;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr m_pub_mask;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr m_sub;
 };
 
@@ -624,6 +689,7 @@ private:
 int main(int argc, char** argv) {
     std::string model_path = "/home/orangepi/yolov8n_seg_final.nb";
     std::string topic_name = "/camera/color/image_raw";
+    std::string mask_topic = "/yolo/dynamic_mask";
     std::string output_path = "resultado_yolov8_seg.jpg";
     std::string static_img_path = "";
     float conf_th = 0.25f;
@@ -635,6 +701,7 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) model_path = argv[++i];
         else if (arg == "--topic" && i + 1 < argc) topic_name = argv[++i];
+        else if (arg == "--mask-topic" && i + 1 < argc) mask_topic = argv[++i];
         else if (arg == "--output" && i + 1 < argc) output_path = argv[++i];
         else if (arg == "--image" && i + 1 < argc) static_img_path = argv[++i];
         else if (arg == "--conf" && i + 1 < argc) conf_th = std::stof(argv[++i]);
@@ -644,13 +711,14 @@ int main(int argc, char** argv) {
         else if (arg == "--help" || arg == "-h") {
             std::cout << "Uso: " << argv[0] << " [opcoes]\n"
                       << "  --model <path>      Caminho para o arquivo .nb (padrao: " << model_path << ")\n"
-                      << "  --topic <name>      Topico ROS 2 de imagem (padrao: " << topic_name << ")\n"
+                      << "  --topic <name>      Topico ROS 2 de imagem RGB (padrao: " << topic_name << ")\n"
+                      << "  --mask-topic <name> Topico de mascara dinamica (padrao: " << mask_topic << ")\n"
                       << "  --output <path>     Arquivo de saida para imagem anotada (padrao: " << output_path << ")\n"
                       << "  --image <path>      Executa inferencia em arquivo de imagem estatica (sem camera ROS)\n"
                       << "  --conf <float>      Threshold de confianca (padrao: 0.25)\n"
                       << "  --nms <float>       Threshold de NMS (padrao: 0.45)\n"
                       << "  --warmup <int>      Frames iniciais descartados para auto-exposicao (padrao: 5)\n"
-                      << "  --continuous        Modo continuo (processa todos os frames)\n";
+                      << "  --continuous        Modo continuo (processa e publica em tempo real sem salvar em disco)\n";
             return 0;
         }
     }
@@ -693,7 +761,7 @@ int main(int argc, char** argv) {
 
     // Modo ROS 2
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<YoloSegRosNode>(engine, topic_name, output_path, conf_th, nms_th, warmup_frames, single_frame);
+    auto node = std::make_shared<YoloSegRosNode>(engine, topic_name, mask_topic, output_path, conf_th, nms_th, warmup_frames, single_frame);
     rclcpp::spin(node);
 
     if (rclcpp::ok()) {

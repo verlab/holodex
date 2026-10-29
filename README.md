@@ -11,6 +11,31 @@ Developed for a **4WD Mecanum wheeled robot** equipped with an **Orbbec Astra Pr
 
 ---
 
+> [!IMPORTANT]
+> ### 🚀 Inicialização Rápida do Robô (Orquestrador Central)
+> Para inicializar o sistema completo do robô com telemetria em tempo real, monitoramento térmico/CPU da SBC, odometria visual 3D (small_gicp), odometria de rodas e supervisão de nós:
+> ```bash
+> # 1. Conectar na Orange Pi
+> ssh orangepi@150.164.212.230  # ou orangepi@holodex.local
+>
+> # 2. Carregar o ambiente e iniciar o orquestrador
+> source /opt/ros/humble/setup.bash
+> source ~/ros2_ws/install/setup.bash
+> ros2 run holodex_bringup holodex_orchestrator
+> # Ou inicializar com Nav2 ativo desde a partida:
+> # ros2 run holodex_bringup holodex_orchestrator --nav2
+> ```
+> **Atalhos no painel interativo:**
+> * `[n]` Alternar Nav2 On/Off dinamicamente
+> * `[s]` Salvar submapa 3D consolidado (`.ply` e `.xyz`)
+> * `[e]` Parada de emergência imediata (corte de `/cmd_vel`)
+> * `[k]` Matar processos órfãos e concorrentes
+> * `[r]` Reiniciar nós do sistema
+> * `[l]` Exibir logs recentes
+> * `[q]` Encerramento limpo e seguro
+
+---
+
 ## 1. System Architecture
 
 The software architecture is modularized into composable ROS 2 components and hardware-accelerated binaries:
@@ -197,7 +222,20 @@ source ~/ros2_ws/install/setup.bash
 
 ## 6. How to Run
 
-### Step 1: Start the Orbbec Astra Pro Camera
+### Método Recomendado: Orquestrador Central Unificado
+Inicia câmera, micro-ROS agent, odometria de rodas, EKF e odometria visual simultaneamente com dashboard TUI:
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 run holodex_bringup holodex_orchestrator
+```
+*(Opções úteis: `--check-only`, `--kill-orphans`, `--no-esp32`, `--no-camera`, `--duration 10`)*.
+
+---
+
+### Método Manual (Nó a Nó)
+
+#### Step 1: Start the Orbbec Astra Pro Camera
 ```bash
 cd ~/orb && ./scripts/start_camera.sh
 ```

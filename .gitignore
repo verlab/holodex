@@ -1,0 +1,38 @@
+# ROS 2 & Colcon Build Artifacts
+build/
+install/
+log/
+.colcon/
+*.colcon/
+
+# Python Bytecode & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+ENV/
+
+# Editor & OS Artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Benchmark logs and point cloud export outputs
+submap_cloud.ply
+submap_cloud.xyz
+submap_output.ply
+submap_output.xyz
+map_output.ply
+map_output.xyz
+*.ply
+*.xyz
+!Models/*.nb
+
+# ROS log directories
+.ros/

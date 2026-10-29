@@ -3,6 +3,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -59,11 +60,16 @@ private:
                          const Eigen::Vector3d& linear_vel,
                          const Eigen::Vector3d& angular_vel);
 
+    void publishSubmapCloud(const rclcpp::Time& stamp);
+
     // ROS 2 Communication
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_initial_guess_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_telemetry_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_submap_cloud_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_save_map_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_save_submap_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_save_map_alias_;
 
     // TF Broadcaster & Listener
@@ -87,6 +93,10 @@ private:
     double max_corr_dist_;
     std::string default_map_path_;
     bool save_on_shutdown_;
+    bool publish_submap_cloud_{true};
+    std::string submap_cloud_topic_{"/icp/submap_cloud"};
+    double submap_publish_interval_sec_{1.0};
+    rclcpp::Time last_submap_pub_time_{0, 0, RCL_ROS_TIME};
 
     // Initial Guess Buffer
     std::mutex odom_mutex_;
