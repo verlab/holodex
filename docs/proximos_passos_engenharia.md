@@ -92,6 +92,11 @@ No arquivo [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud
 
 ---
 
+### Status (implementado, validado só em software)
+`odom1: /icp/odom` (X, Y, Yaw) está no `ekf.yaml`; o ICP usa `/odom/wheel` como chute; a covariância é inflada em `TRACKING_LOST`; a IMU contribui só com `wz`. Falta validar com hardware e mover o submapa para o referencial do EKF.
+
+---
+
 ## 2. Frente 2: Ativação da Percepção Dinâmica com Filtro Neural por NPU
 
 ### Contexto e Motivação

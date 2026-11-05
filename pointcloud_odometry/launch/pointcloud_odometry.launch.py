@@ -31,8 +31,8 @@ def generate_launch_description():
 
     initial_guess_topic_arg = DeclareLaunchArgument(
         'initial_guess_topic',
-        default_value='/odometry/filtered',
-        description='Topico de odometria do EKF/encoders para chute inicial'
+        default_value='/odom/wheel',
+        description='Odometria de rodas (independente do ICP) para chute inicial. Nao use a saida do EKF.'
     )
 
     # Zero-Copy Composable Node Container

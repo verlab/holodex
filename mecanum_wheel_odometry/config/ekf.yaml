@@ -29,11 +29,12 @@ ekf_filter_node:
     odom0_differential: false
     odom0_relative: false
 
-    # 2. Sensor inercial filtrado (/imu/data de imu_filter_madgwick)
-    # Fusão de orientação (yaw) e velocidade angular (wz)
+    # 2. Sensor inercial (/imu/data de imu_filter_madgwick)
+    # Somente velocidade angular wz. O yaw absoluto do Madgwick (sem magnetometro) e apenas o giro
+    # integrado: usa-lo junto com wz contaria a mesma informacao duas vezes. O yaw absoluto vem do ICP.
     imu0: /imu/data
     imu0_config: [false, false, false,
-                  false, false, true,
+                  false, false, false,
                   false, false, false,
                   false, false, true,
                   false, false, false]
@@ -42,3 +43,21 @@ ekf_filter_node:
     imu0_relative: true
     imu0_queue_size: 10
     imu0_remove_gravitational_acceleration: true
+
+    # 3. Odometria visual 3D (small_gicp VGICP) - pose absoluta X, Y, Yaw
+    # So pose (sem velocidades): as velocidades do ICP sao diferencas finitas ruidosas e as rodas ja as fornecem.
+    # Covariancia vem do ICP (H^-1 com piso); em TRACKING_LOST ela e inflada (1e3) e o EKF a ignora.
+    # O chute inicial do ICP usa /odom/wheel (nao /odometry/filtered), evitando realimentacao.
+    odom1: /icp/odom
+    odom1_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_queue_size: 10
+    odom1_nodelay: true
+    odom1_differential: false
+    odom1_relative: false
+    # Rejeicao de outliers por distancia de Mahalanobis (a covariancia do EKF cresce sem correcao,
+    # entao um ICP recuperado volta a ser aceito)
+    odom1_pose_rejection_threshold: 5.0

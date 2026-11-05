@@ -163,7 +163,7 @@ flowchart TD
 ### 6. Full EKF Compatibility & TF Safety
 * Configured with `publish_tf: false` by default to avoid conflicting transforms against `robot_localization` on Mecanum mobile platforms.
 * Generates valid $6 \times 6$ pose covariance matrices derived from the inverse Gauss-Newton Hessian ($H^{-1}$).
-* Consumes wheel/IMU odometry from `/odom_combined` to serve as a reliable initial motion prior, preventing tracking loss during high-speed in-place spins.
+* Consumes wheel odometry from `/odom/wheel` to serve as a reliable initial motion prior, preventing tracking loss during high-speed in-place spins.
 
 ---
 
@@ -250,7 +250,7 @@ ros2 launch pointcloud_odometry pointcloud_odometry.launch.py
 To run with custom parameters:
 ```bash
 ros2 launch pointcloud_odometry pointcloud_odometry.launch.py \
-    initial_guess_topic:=/odom_combined \
+    initial_guess_topic:=/odom/wheel \
     publish_tf:=false \
     enable_dynamic_filter:=false
 ```
@@ -282,7 +282,7 @@ This automatically writes:
 | Topic | Message Type | Description |
 | :--- | :--- | :--- |
 | `/camera/depth/points` | `sensor_msgs/msg/PointCloud2` | Raw organized point cloud from Astra Pro ($640 \times 480$). |
-| `/odom_combined` | `nav_msgs/msg/Odometry` | Wheel/IMU EKF odometry used as initial motion guess. |
+| `/odom/wheel` | `nav_msgs/msg/Odometry` | Wheel odometry used as initial motion guess (independent of the ICP/EKF). |
 | `/yolo/dynamic_mask` | `sensor_msgs/msg/Image` | Optional 8-bit dynamic obstacle mask (`mono8`). |
 
 ### Published Topics

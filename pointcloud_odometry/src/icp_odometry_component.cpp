@@ -22,11 +22,16 @@ IcpOdometryComponent::IcpOdometryComponent(const rclcpp::NodeOptions& options)
     // Parameters declaration
     input_cloud_topic_ = this->declare_parameter<std::string>("input_cloud_topic", "/camera/filtered_points");
     odom_topic_ = this->declare_parameter<std::string>("odom_topic", "/icp/odom");
-    initial_guess_topic_ = this->declare_parameter<std::string>("initial_guess_topic", "/odometry/filtered");
+    initial_guess_topic_ = this->declare_parameter<std::string>("initial_guess_topic", "/odom/wheel");
     odom_frame_id_ = this->declare_parameter<std::string>("odom_frame_id", "odom");
     base_frame_id_ = this->declare_parameter<std::string>("base_frame_id", "base_link");
     publish_tf_ = this->declare_parameter<bool>("publish_tf", false); // RIGIDLY FALSE by default to avoid collision with robot_localization
     use_tf_extrinsic_ = this->declare_parameter<bool>("use_tf_extrinsic", false);
+    // Pisos de variancia (m^2 / rad^2): H^-1 sozinho e otimista; o EKF deve ponderar o ICP de forma realista.
+    min_pos_variance_ = this->declare_parameter<double>("min_pos_variance", 1.0e-4);   // 1 cm
+    min_rot_variance_ = this->declare_parameter<double>("min_rot_variance", 1.0e-3);   // ~1.8 deg
+    // Variancia usada quando a medicao e invalida (frame rejeitado / TRACKING_LOST): faz o EKF ignora-la.
+    lost_variance_ = this->declare_parameter<double>("lost_variance", 1.0e3);
     voxel_resolution_ = this->declare_parameter<double>("voxel_resolution", 0.15); // 15 cm otimizado para ruído de profundidade RGB-D indoor
     keyframe_delta_trans_ = this->declare_parameter<double>("keyframe_delta_trans", 0.15); // 15 cm
     keyframe_delta_rot_rad_ = this->declare_parameter<double>("keyframe_delta_rot_deg", 8.0) * M_PI / 180.0; // 8 degrees
@@ -226,7 +231,7 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
             source_cloud->size(), submap_voxelmap_->size(), voxel_resolution_, min_x, max_x, min_y, max_y, min_z, max_z);
 
         publishOdometry(msg->header.stamp, current_pose_, Eigen::Matrix<double, 6, 6>::Identity() * 100.0,
-                        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+                        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), true, 1.0, 0.033);
 
         if (publish_submap_cloud_) {
             publishSubmapCloud(msg->header.stamp);
@@ -390,7 +395,15 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
     }
 
     // 8. Publicar Odometria ROS 2
-    publishOdometry(msg->header.stamp, current_pose_, result.H, linear_vel, angular_vel);
+    // Medicao so e confiavel se o frame foi aceito E o rastreio nao esta perdido. Caso contrario a pose
+    // publicada e a ultima conhecida (obsoleta): a covariancia e inflada para o EKF ignora-la.
+    const bool measurement_valid = valid_convergence && tracking_state_ != TrackingState::LOST;
+    // Escala de residuo: sigma^2 ~ erro_total / (3*inliers - 6) (GICP, 3 graus de liberdade por correspondencia).
+    // Nunca abaixo de 1, para nao tornar a covariancia mais otimista que H^-1.
+    const double dof = std::max(1.0, 3.0 * static_cast<double>(result.num_inliers) - 6.0);
+    const double residual_scale = std::clamp(result.error / dof, 1.0, 100.0);
+    publishOdometry(msg->header.stamp, current_pose_, result.H, linear_vel, angular_vel,
+                    measurement_valid, residual_scale, dt);
 
     last_cloud_stamp_ = current_stamp;
 
@@ -441,7 +454,10 @@ void IcpOdometryComponent::publishOdometry(const rclcpp::Time& stamp,
                                           const Eigen::Isometry3d& pose,
                                           const Eigen::Matrix<double, 6, 6>& H,
                                           const Eigen::Vector3d& linear_vel,
-                                          const Eigen::Vector3d& angular_vel) {
+                                          const Eigen::Vector3d& angular_vel,
+                                          bool measurement_valid,
+                                          double residual_scale,
+                                          double dt) {
     auto odom_msg = std::make_unique<nav_msgs::msg::Odometry>();
     odom_msg->header.stamp = stamp;
     odom_msg->header.frame_id = odom_frame_id_;
@@ -467,33 +483,36 @@ void IcpOdometryComponent::publishOdometry(const rclcpp::Time& stamp,
     odom_msg->pose.covariance.fill(0.0);
     odom_msg->twist.covariance.fill(0.0);
 
+    // Covariancia: pose = sigma^2 * H^-1 (piso de variancia aplicado). Ordem do small_gicp: [rot(0-2), trans(3-5)].
+    // Medicao invalida (frame rejeitado / TRACKING_LOST): variancia enorme na diagonal, para o EKF ignorar.
+    auto& pc = odom_msg->pose.covariance;
+    auto& tc = odom_msg->twist.covariance;
     bool cov_valid = false;
-    if (H.allFinite() && std::abs(H.determinant()) > 1e-6) {
-        Eigen::Matrix<double, 6, 6> cov_gicp = H.inverse();
+    if (measurement_valid && H.allFinite() && std::abs(H.determinant()) > 1e-6) {
+        const Eigen::Matrix<double, 6, 6> cov_gicp = H.inverse() * residual_scale;
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
-                odom_msg->pose.covariance[r * 6 + c] = std::clamp(cov_gicp(3 + r, 3 + c), 1e-6, 1.0);
+                pc[r * 6 + c] = cov_gicp(3 + r, 3 + c);
+                pc[(3 + r) * 6 + (3 + c)] = cov_gicp(r, c);
             }
         }
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                odom_msg->pose.covariance[(3 + r) * 6 + (3 + c)] = std::clamp(cov_gicp(r, c), 1e-6, 1.0);
-            }
+        for (int i = 0; i < 3; ++i) {
+            pc[i * 6 + i] = std::max(pc[i * 6 + i], min_pos_variance_);
+            pc[(3 + i) * 6 + (3 + i)] = std::max(pc[(3 + i) * 6 + (3 + i)], min_rot_variance_);
         }
         cov_valid = true;
     }
 
     if (!cov_valid) {
-        odom_msg->pose.covariance[0] = 1e-3;   // x
-        odom_msg->pose.covariance[7] = 1e-3;   // y
-        odom_msg->pose.covariance[14] = 1e-3;  // z
-        odom_msg->pose.covariance[21] = 1e-2;  // roll
-        odom_msg->pose.covariance[28] = 1e-2;  // pitch
-        odom_msg->pose.covariance[35] = 1e-2;  // yaw
+        pc.fill(0.0);
+        const double v = measurement_valid ? 1.0e-2 : lost_variance_;  // fallback conservador se H e singular
+        for (int i = 0; i < 6; ++i) pc[i * 6 + i] = v;
     }
 
+    // Twist por diferenca finita: var(v) ~ 2 * var(pos) / dt^2 (inclui o ruido de dois frames consecutivos).
+    const double inv_dt2 = 1.0 / std::max(dt * dt, 1e-6);
     for (int i = 0; i < 6; ++i) {
-        odom_msg->twist.covariance[i * 6 + i] = odom_msg->pose.covariance[i * 6 + i] * 5.0;
+        tc[i * 6 + i] = measurement_valid ? 2.0 * pc[i * 6 + i] * inv_dt2 : lost_variance_;
     }
 
     pub_odom_->publish(std::move(odom_msg));

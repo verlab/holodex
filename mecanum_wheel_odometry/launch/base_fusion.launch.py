@@ -31,7 +31,8 @@ def generate_launch_description():
         ]
     )
 
-    # 3. EKF (Robot Localization: funde rodas + IMU e gera TF odom -> base_link)
+    # 3. EKF (Robot Localization: funde rodas + IMU + ICP e gera TF odom -> base_link)
+    # base_link -> imu_link vem do URDF (robot_state_publisher); NAO publicar TF estatico duplicado aqui.
     ekf_node = Node(
         package='robot_localization',
         executable='ekf_node',
@@ -43,19 +44,7 @@ def generate_launch_description():
         ]
     )
 
-    # 4. TF estático base_link -> imu_link (o EKF precisa dele para usar /imu/data).
-    # Ajuste x y z yaw pitch roll conforme a posição real do BMI160 no chassi.
-    imu_tf_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='base_to_imu_static_tf',
-        arguments=['--x', '0', '--y', '0', '--z', '0',
-                   '--yaw', '0', '--pitch', '0', '--roll', '0',
-                   '--frame-id', 'base_link', '--child-frame-id', 'imu_link']
-    )
-
     return LaunchDescription([
-        imu_tf_node,
         wheel_odom_node,
         madgwick_node,
         ekf_node

@@ -14,12 +14,17 @@ icp_odometry_component:
   ros__parameters:
     input_cloud_topic: "/camera/filtered_points"
     odom_topic: "/icp/odom"
-    initial_guess_topic: "/odometry/filtered"
+    # Chute inicial: SOMENTE odometria de rodas (independente do ICP). NAO usar /odometry/filtered:
+    # o EKF funde /icp/odom, e isso criaria um laco de realimentacao (dupla contagem).
+    initial_guess_topic: "/odom/wheel"
     odom_frame_id: "odom"
     base_frame_id: "base_link"
     publish_tf: false
     use_tf_extrinsic: true
     voxel_resolution: 0.15
+    min_pos_variance: 1.0e-4   # piso de variancia de posicao (m^2) = 1 cm
+    min_rot_variance: 1.0e-3   # piso de variancia de rotacao (rad^2)
+    lost_variance: 1.0e3       # variancia publicada quando a medicao e invalida/TRACKING_LOST
     keyframe_delta_trans: 0.15
     keyframe_delta_rot_deg: 8.0
     num_threads: 4

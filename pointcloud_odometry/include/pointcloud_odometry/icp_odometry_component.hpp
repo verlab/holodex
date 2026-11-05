@@ -58,7 +58,10 @@ private:
                          const Eigen::Isometry3d& pose,
                          const Eigen::Matrix<double, 6, 6>& H,
                          const Eigen::Vector3d& linear_vel,
-                         const Eigen::Vector3d& angular_vel);
+                         const Eigen::Vector3d& angular_vel,
+                         bool measurement_valid = true,
+                         double residual_scale = 1.0,
+                         double dt = 0.033);
 
     void publishSubmapCloud(const rclcpp::Time& stamp);
 
@@ -86,6 +89,9 @@ private:
     bool publish_tf_;
     bool use_tf_extrinsic_;
     double voxel_resolution_;
+    double min_pos_variance_;
+    double min_rot_variance_;
+    double lost_variance_;
     double keyframe_delta_trans_;
     double keyframe_delta_rot_rad_;
     int num_threads_;

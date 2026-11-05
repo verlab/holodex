@@ -54,7 +54,7 @@ O pacote foi desenhado para contornar o maior gargalo de odometria 3D em ARM emb
 * **Zero-Collision TF (`publish_tf: false`):**
   * O robô possui um filtro EKF (`robot_localization`) fundindo encoders das rodas Mecanum e IMU. Para evitar conflito de publicadores no TF tree, a odometria visual **NUNCA** deve publicar a transformação `odom -> base_link` diretamente.
 * **Chute Inicial (Initial Guess):**
-  * Assina `/odom_combined` (odometria das rodas Mecanum + IMU).
+  * Assina `/odom/wheel` (odometria pura das rodas Mecanum) como chute inicial. **Nunca** `/odometry/filtered`: o EKF funde `/icp/odom`, e isso criaria realimentação (dupla contagem).
   * Calcula o incremento de movimento relativo $\Delta T_{\text{wheel}}$ entre frames e alimenta o solver do ICP, garantindo convergência mesmo durante rotações bruscas.
 
 ---
@@ -225,7 +225,14 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 * **Sintoma:** O solver do `small_gicp` não recebia chutes iniciais de odometria de rodas durante rotações rápidas, operando como tracking desacoplado.
 * **Causa Raiz:** O componente de odometria ICP assinava `/odom_combined` por padrão, enquanto o filtro EKF do robô publica em `/odometry/filtered`.
 * **Solução:**
-  * Alinhamos o tópico padrão para `/odometry/filtered` no código C++ e no arquivo de parâmetros, e ativamos `use_tf_extrinsic: true` para compensação de braço de alavanca.
+  * (Superado pelo Post-Mortem 14) Havia sido alinhado para `/odometry/filtered`; agora o padrão é `/odom/wheel`. Mantém `use_tf_extrinsic: true` para compensação de braço de alavanca.
+
+---
+
+### Post-Mortem 14: Fusão do ICP no EKF (realimentação, covariância e yaw duplicado)
+* **Problemas:** (1) o ICP usava a saída do EKF como chute inicial, e o EKF passou a fundir o ICP (laço de realimentação); (2) a covariância do ICP era `H⁻¹` limitada a 1.0 m², sem inflar em `TRACKING_LOST` nem em frames rejeitados (pose obsoleta republicada como medição); (3) a IMU entrava com yaw absoluto e `wz` do mesmo giroscópio; (4) TF `base_link→imu_link` publicado duas vezes (URDF e estático no `base_fusion.launch.py`).
+* **Solução:** chute inicial em `/odom/wheel`; `publishOdometry` usa `σ²·H⁻¹` com pisos (`min_pos_variance`, `min_rot_variance`) e variância `lost_variance` (1e3) quando o frame é rejeitado ou o estado é LOST; `ekf.yaml` ganhou `odom1: /icp/odom` (só X, Y, Yaw, rejeição Mahalanobis 5.0) e a IMU contribui só com `wz`; TF estático removido (vale o do URDF).
+* **Pendente:** o submapa (`/icp/submap_cloud`, frame `odom`) fica no referencial interno do ICP, não no do EKF; ver docs/proximos_passos_engenharia.md.
 
 ---
 
