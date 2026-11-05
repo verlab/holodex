@@ -236,6 +236,15 @@ Esta seção documenta bugs reais encontrados durante os testes práticos na ban
 
 ---
 
+### Post-Mortem 15: Recuperação de `TRACKING_LOST` (dead-reckoning + porta adaptativa)
+* **Problema:** com a pose congelada em frames rejeitados, o chute era `pose_congelada × incremento de 1 frame`. Se o robô andasse > ~0,5 m (ou girasse > ~25°) durante a perda, a relocalização era impossível. Os limites cinemáticos eram fixos e relativos à pose congelada.
+* **Solução (`recovery_utils.hpp`, `icp_odometry_component.cpp`):** (1) no primeiro frame rejeitado arma-se uma âncora (pose ICP boa + pose da odometria de referência naquele instante); enquanto rejeitado, o chute é `T_icp_âncora · (T_ref_âncora⁻¹ · T_ref_agora)`; (2) a porta cinemática passa a medir o desvio do ICP em relação à **predição**: `max = base + slip_ratio × deslocamento_previsto` (base 0,08 m/5° normal; 0,30 m/25° em dead-reckoning/LOST). Sem predição, valem os limites absolutos antigos.
+* **Referência:** `use_ekf_for_recovery` (padrão `false` = rodas). Com `true` usa `/odometry/filtered` só durante a rejeição, quando o ICP tem peso ~0 no EKF (sem realimentação). Ligar só depois de validar a IMU.
+* **Status:** compilado e testado na placa só em lógica (`test_recovery_utils`). **Não validado com câmera/IMU reais.** A porta é adaptativa por deslocamento, não uma distância de Mahalanobis completa.
+* **Ajustes a fazer em bancada:** `gate_*`, e se a relocalização precisa de raio de busca maior que 0,5 m (`relocalize_attempt_counter_ < 5` ainda limita a 5 tentativas com raio expandido).
+
+---
+
 ### Post-Mortem 13: Namespace Mismatch de Parâmetros do Motion Supervisor
 * **Sintoma:** O nó `holodex_motion_supervisor` iniciava sempre com parâmetros default (ex: limiares conservadores) ignorando as configurações do `supervisor.yaml`.
 * **Causa Raiz:** O arquivo `supervisor.yaml` continha a chave raiz `motion_supervisor:`, enquanto o executável e os launch files nomeavam o nó como `holodex_motion_supervisor`. No ROS 2 Humble, nós não aninhados sob o mesmo nome ignoram o bloco de parâmetros.

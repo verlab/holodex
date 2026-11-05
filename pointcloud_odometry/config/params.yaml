@@ -24,6 +24,14 @@ icp_odometry_component:
     voxel_resolution: 0.15
     min_pos_variance: 1.0e-4   # piso de variancia de posicao (m^2) = 1 cm
     min_rot_variance: 1.0e-3   # piso de variancia de rotacao (rad^2)
+    # Recuperacao de rastreio: dead-reckoning desde o ultimo frame bom + porta adaptativa
+    use_ekf_for_recovery: false   # true = usa /odometry/filtered (EKF) so durante rejeicao; false = rodas
+    recovery_ref_topic: "/odometry/filtered"
+    gate_base_trans: 0.08         # m: tolerancia base do desvio ICP vs predicao
+    gate_base_rot_deg: 5.0
+    gate_lost_trans: 0.30         # m: tolerancia base durante dead-reckoning/LOST
+    gate_lost_rot_deg: 25.0
+    gate_slip_ratio: 0.5          # + fracao do deslocamento previsto (deslizamento Mecanum)
     lost_variance: 1.0e3       # variancia publicada quando a medicao e invalida/TRACKING_LOST
     keyframe_delta_trans: 0.15
     keyframe_delta_rot_deg: 8.0

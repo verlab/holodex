@@ -32,6 +32,16 @@ IcpOdometryComponent::IcpOdometryComponent(const rclcpp::NodeOptions& options)
     min_rot_variance_ = this->declare_parameter<double>("min_rot_variance", 1.0e-3);   // ~1.8 deg
     // Variancia usada quando a medicao e invalida (frame rejeitado / TRACKING_LOST): faz o EKF ignora-la.
     lost_variance_ = this->declare_parameter<double>("lost_variance", 1.0e3);
+    // Recuperacao de rastreio (dead-reckoning durante frames rejeitados / LOST)
+    // O EKF so e usado como referencia enquanto o ICP esta rejeitado (peso ~0 no EKF), sem realimentacao.
+    // Mantenha false enquanto a IMU nao estiver validada: o EKF herdaria o erro do giroscopio.
+    use_ekf_for_recovery_ = this->declare_parameter<bool>("use_ekf_for_recovery", false);
+    recovery_ref_topic_ = this->declare_parameter<std::string>("recovery_ref_topic", "/odometry/filtered");
+    gate_.base_trans = this->declare_parameter<double>("gate_base_trans", 0.08);
+    gate_.base_rot_rad = this->declare_parameter<double>("gate_base_rot_deg", 5.0) * M_PI / 180.0;
+    gate_.lost_trans = this->declare_parameter<double>("gate_lost_trans", 0.30);
+    gate_.lost_rot_rad = this->declare_parameter<double>("gate_lost_rot_deg", 25.0) * M_PI / 180.0;
+    gate_.slip_ratio = this->declare_parameter<double>("gate_slip_ratio", 0.5);
     voxel_resolution_ = this->declare_parameter<double>("voxel_resolution", 0.15); // 15 cm otimizado para ruído de profundidade RGB-D indoor
     keyframe_delta_trans_ = this->declare_parameter<double>("keyframe_delta_trans", 0.15); // 15 cm
     keyframe_delta_rot_rad_ = this->declare_parameter<double>("keyframe_delta_rot_deg", 8.0) * M_PI / 180.0; // 8 degrees
@@ -59,6 +69,12 @@ IcpOdometryComponent::IcpOdometryComponent(const rclcpp::NodeOptions& options)
     sub_initial_guess_ = this->create_subscription<nav_msgs::msg::Odometry>(
         initial_guess_topic_, 10,
         std::bind(&IcpOdometryComponent::initialGuessCallback, this, std::placeholders::_1));
+
+    if (use_ekf_for_recovery_) {
+        sub_recovery_ref_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            recovery_ref_topic_, 10,
+            std::bind(&IcpOdometryComponent::recoveryRefCallback, this, std::placeholders::_1));
+    }
 
     // Services to export pointcloud map for scientific paper figures
     srv_save_map_ = this->create_service<std_srvs::srv::Trigger>(
@@ -118,44 +134,86 @@ void IcpOdometryComponent::initialGuessCallback(const nav_msgs::msg::Odometry::C
     }
 }
 
-bool IcpOdometryComponent::computeInitialGuess(double current_stamp, Eigen::Isometry3d& guess_pose) {
+void IcpOdometryComponent::recoveryRefCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& msg) {
     std::lock_guard<std::mutex> lock(odom_mutex_);
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    pose.translation() = Eigen::Vector3d(msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
+    pose.linear() = Eigen::Quaterniond(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
+                                       msg->pose.pose.orientation.y, msg->pose.pose.orientation.z)
+                        .normalized().toRotationMatrix();
+    recovery_ref_buffer_.push_back({msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9, pose});
+    if (recovery_ref_buffer_.size() > 500) recovery_ref_buffer_.pop_front();
+}
 
-    if (initial_guess_buffer_.size() >= 2 && last_cloud_stamp_ > 0.0) {
-        auto find_closest = [this](double target_t) -> const OdomSample* {
-            const OdomSample* best = nullptr;
-            double min_diff = std::numeric_limits<double>::max();
-            for (const auto& sample : initial_guess_buffer_) {
-                double diff = std::abs(sample.timestamp - target_t);
-                if (diff < min_diff) {
-                    min_diff = diff;
-                    best = &sample;
-                }
+namespace {
+// Amostra mais proxima de t; defasagem maxima de 100 ms em relacao ao carimbo da camera.
+const OdomSample* findClosestSample(const std::deque<OdomSample>& buf, double t) {
+    const OdomSample* best = nullptr;
+    double min_diff = std::numeric_limits<double>::max();
+    for (const auto& sample : buf) {
+        const double diff = std::abs(sample.timestamp - t);
+        if (diff < min_diff) { min_diff = diff; best = &sample; }
+    }
+    return (min_diff <= 0.10) ? best : nullptr;
+}
+}  // namespace
+
+bool IcpOdometryComponent::lookupRecoveryRef(double t, Eigen::Isometry3d& pose) {
+    std::lock_guard<std::mutex> lock(odom_mutex_);
+    const auto& buf = (use_ekf_for_recovery_ && !recovery_ref_buffer_.empty()) ? recovery_ref_buffer_
+                                                                              : initial_guess_buffer_;
+    const OdomSample* s = findClosestSample(buf, t);
+    if (!s || !s->pose.matrix().allFinite()) return false;
+    pose = s->pose;
+    return true;
+}
+
+IcpOdometryComponent::GuessInfo IcpOdometryComponent::computeInitialGuess(double current_stamp,
+                                                                          Eigen::Isometry3d& guess_pose) {
+    GuessInfo info;
+
+    // A) Dead-reckoning: ha uma ancora (frames rejeitados / LOST). Propaga a pose do ICP desde o ultimo
+    //    frame bom com o incremento TOTAL da referencia, e nao so o do ultimo frame (pose congelada).
+    if (dr_anchor_.active) {
+        Eigen::Isometry3d ref_now;
+        if (lookupRecoveryRef(current_stamp, ref_now)) {
+            const Eigen::Isometry3d g = propagateFromAnchor(dr_anchor_, ref_now);
+            if (g.matrix().allFinite()) {
+                guess_pose = g;
+                info.available = true;
+                info.dead_reckoning = true;
+                info.pred_trans = (g.translation() - dr_anchor_.icp_pose.translation()).norm();
+                info.pred_rot = rotationAngle(dr_anchor_.icp_pose, g);
+                return info;
             }
-            // Defasagem máxima de 100 ms (0.10s) em relação ao carimbo da câmera
-            if (min_diff <= 0.10) return best;
-            return nullptr;
-        };
+        }
+        guess_pose = current_pose_;
+        return info;  // sem referencia utilizavel agora
+    }
 
-        const OdomSample* s_prev = find_closest(last_cloud_stamp_);
-        const OdomSample* s_curr = find_closest(current_stamp);
+    // B) Normal: incremento relativo das rodas entre o frame anterior e o atual.
+    std::lock_guard<std::mutex> lock(odom_mutex_);
+    if (initial_guess_buffer_.size() >= 2 && last_cloud_stamp_ > 0.0) {
+        const OdomSample* s_prev = findClosestSample(initial_guess_buffer_, last_cloud_stamp_);
+        const OdomSample* s_curr = findClosestSample(initial_guess_buffer_, current_stamp);
 
         if (s_prev && s_curr) {
             Eigen::Isometry3d delta_wheel = s_prev->pose.inverse() * s_curr->pose;
             double step_wheel_trans = delta_wheel.translation().norm();
-            // Validar consistência do incremento das rodas (< 0.10m em 33ms)
+            // Validar consistencia do incremento das rodas (< 0.10m em 33ms)
             if (step_wheel_trans < 0.10 && delta_wheel.matrix().allFinite()) {
                 guess_pose = current_pose_ * delta_wheel;
-                return true;
+                info.available = true;
+                info.pred_trans = step_wheel_trans;
+                info.pred_rot = std::abs(Eigen::AngleAxisd(delta_wheel.linear()).angle());
+                return info;
             }
         }
     }
 
-    // Se a odometria de rodas estiver ausente ou defasada em mais de 100 ms,
-    // usar explicitamente a identidade como incremento relativo (guess = current_pose_),
-    // evitando que buffers vazios ou extrapolações cinemáticas injetem saltos na otimização.
+    // Sem odometria utilizavel: identidade como incremento (guess = current_pose_).
     guess_pose = current_pose_;
-    return false;
+    return info;
 }
 
 void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg) {
@@ -225,6 +283,7 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
 
         is_first_frame_ = false;
         last_cloud_stamp_ = current_stamp;
+        last_good_stamp_ = current_stamp;
 
         RCLCPP_INFO(this->get_logger(),
             "[ICP First Frame] Inseridos %zu pontos -> Submapa consolidou %zu voxels (resolucao=%.2fm). BBox: X=[%.3f, %.3f] Y=[%.3f, %.3f] Z=[%.3f, %.3f] m",
@@ -241,7 +300,7 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
 
     // 5. Calcular Chute Inicial (Initial Guess) via Sensor Fusion
     Eigen::Isometry3d guess_pose = current_pose_;
-    bool used_wheel_guess = computeInitialGuess(current_stamp, guess_pose);
+    const GuessInfo guess = computeInitialGuess(current_stamp, guess_pose);
 
     // 6. Alinhamento Frame-to-Submap (VGICP via small_gicp)
     double align_max_corr_dist = max_corr_dist_; // 0.30 m por padrão
@@ -283,11 +342,18 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
 
     // Limites cinemáticos físicos para o robô a ~30Hz (dt ~ 33ms):
     // Durante relocalização (LOST), permite raio maior (até 0.30m e 25 deg) para reconectar ao submapa
-    double max_allowed_trans = (tracking_state_ == TrackingState::LOST) ? 0.30 : (used_wheel_guess ? 0.20 : 0.12);
+    double max_allowed_trans = (tracking_state_ == TrackingState::LOST) ? 0.30 : (guess.available ? 0.20 : 0.12);
     double max_allowed_rot = (tracking_state_ == TrackingState::LOST) ? (25.0 * M_PI / 180.0) :
-                             (used_wheel_guess ? (20.0 * M_PI / 180.0) : (15.0 * M_PI / 180.0));
+                             (guess.available ? (20.0 * M_PI / 180.0) : (15.0 * M_PI / 180.0));
 
-    bool kinematic_sane = (step_trans <= max_allowed_trans) && (step_rot <= max_allowed_rot);
+    // Com predicao disponivel (rodas ou dead-reckoning), a porta e adaptativa: mede o desvio do ICP em
+    // relacao a PREDICAO (tolerancia = base + slip_ratio * deslocamento previsto). Isso permite
+    // relocalizar apos o robo ter andado/girado durante a perda, e evita falsos LOST em curvas rapidas.
+    // Sem predicao, mantem os limites absolutos antigos (relativos a ultima pose).
+    bool kinematic_sane = guess.available
+        ? withinGate(guess_pose, result.T_target_source, guess.pred_trans, guess.pred_rot,
+                     guess.dead_reckoning, gate_)
+        : ((step_trans <= max_allowed_trans) && (step_rot <= max_allowed_rot));
     double inlier_ratio = (source_cloud->size() > 0) ? (static_cast<double>(result.num_inliers) / source_cloud->size()) : 0.0;
 
     // Condição de frame aceitável para tracking
@@ -320,6 +386,22 @@ void IcpOdometryComponent::cloudCallback(const sensor_msgs::msg::PointCloud2::Co
     }
 
     bool valid_convergence = is_good_frame;
+
+    // Ancora de dead-reckoning: desligada em frame bom; armada no primeiro frame rejeitado com a ultima
+    // pose boa (current_pose_ ainda e a ultima boa) e a referencia no instante daquele frame bom.
+    if (is_good_frame) {
+        dr_anchor_.active = false;
+        last_good_stamp_ = current_stamp;
+    } else if (!dr_anchor_.active && last_good_stamp_ > 0.0) {
+        Eigen::Isometry3d ref_at_good;
+        if (lookupRecoveryRef(last_good_stamp_, ref_at_good)) {
+            dr_anchor_.icp_pose = current_pose_;
+            dr_anchor_.ref_pose = ref_at_good;
+            dr_anchor_.active = true;
+            RCLCPP_INFO(this->get_logger(), "[ICP] Frame rejeitado: dead-reckoning armado (ref=%s).",
+                        use_ekf_for_recovery_ ? "EKF" : "rodas");
+        }
+    }
 
     if (valid_convergence) {
         last_pose_ = current_pose_;

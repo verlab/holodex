@@ -99,12 +99,17 @@ add_executable(icp_odometry_node src/icp_odometry_node.cpp)
 target_link_libraries(icp_odometry_node icp_odometry_component)
 ament_target_dependencies(icp_odometry_node rclcpp)
 
+# Teste standalone da logica de recuperacao (dead-reckoning + porta adaptativa)
+add_executable(test_recovery_utils test/test_recovery_utils.cpp)
+target_link_libraries(test_recovery_utils Eigen3::Eigen)
+
 # Instalação
 install(TARGETS
   pointcloud_filter_component
   icp_odometry_component
   pointcloud_filter_node
   icp_odometry_node
+  test_recovery_utils
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

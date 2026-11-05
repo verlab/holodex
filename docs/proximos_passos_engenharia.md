@@ -93,7 +93,7 @@ No arquivo [`icp_odometry_component.cpp`](file:///home/alisson/orange/pointcloud
 ---
 
 ### Status (implementado, validado só em software)
-`odom1: /icp/odom` (X, Y, Yaw) está no `ekf.yaml`; o ICP usa `/odom/wheel` como chute; a covariância é inflada em `TRACKING_LOST`; a IMU contribui só com `wz`. Falta validar com hardware e mover o submapa para o referencial do EKF.
+`odom1: /icp/odom` (X, Y, Yaw) está no `ekf.yaml`; o ICP usa `/odom/wheel` como chute; a covariância é inflada em `TRACKING_LOST`; a IMU contribui só com `wz`. Recuperação de `TRACKING_LOST` implementada (dead-reckoning desde a última pose boa + porta adaptativa; ver GEMINI.md, Post-Mortem 15). Falta validar com hardware (câmera + IMU confiável, depois testar `use_ekf_for_recovery: true`) e mover o submapa para o referencial do EKF.
 
 ---
 

@@ -13,6 +13,8 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
+#include "pointcloud_odometry/recovery_utils.hpp"
+
 #include <small_gicp/points/point_cloud.hpp>
 #include <small_gicp/ann/gaussian_voxelmap.hpp>
 #include <small_gicp/registration/registration_helper.hpp>
@@ -44,7 +46,17 @@ private:
     void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg);
     void initialGuessCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& msg);
 
-    bool computeInitialGuess(double current_stamp, Eigen::Isometry3d& guess_pose);
+    void recoveryRefCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& msg);
+
+    struct GuessInfo {
+        bool available{false};        // havia odometria externa utilizavel
+        bool dead_reckoning{false};   // chute propagado desde a ancora (frames rejeitados / LOST)
+        double pred_trans{0.0};       // deslocamento previsto (m): base da tolerancia da porta
+        double pred_rot{0.0};         // rotacao prevista (rad)
+    };
+    GuessInfo computeInitialGuess(double current_stamp, Eigen::Isometry3d& guess_pose);
+    // Pose da odometria de referencia do dead-reckoning (EKF se habilitado, senao rodas) mais proxima de t.
+    bool lookupRecoveryRef(double t, Eigen::Isometry3d& pose);
     void handleSaveMap(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                        std::shared_ptr<std_srvs::srv::Trigger::Response> res);
     bool saveMapToFile(const std::string& filepath, size_t* out_saved_points = nullptr);
@@ -68,6 +80,7 @@ private:
     // ROS 2 Communication
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_initial_guess_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_recovery_ref_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_telemetry_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_submap_cloud_;
@@ -107,6 +120,12 @@ private:
     // Initial Guess Buffer
     std::mutex odom_mutex_;
     std::deque<OdomSample> initial_guess_buffer_;
+    std::deque<OdomSample> recovery_ref_buffer_;   // saida do EKF (so usada se use_ekf_for_recovery)
+    bool use_ekf_for_recovery_{false};
+    std::string recovery_ref_topic_;
+    GateParams gate_;
+    DeadReckoningAnchor dr_anchor_;                // ativa enquanto frames sao rejeitados / LOST
+    double last_good_stamp_{0.0};
     double last_cloud_stamp_{0.0};
 
     // Submap & Registration State
