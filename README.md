@@ -71,11 +71,12 @@ flowchart TD
     end
 
     subgraph SENSOR_FUSION ["4. Navigation & State Estimation"]
-        WHEEL_EKF["/odom_combined<br>(Mecanum Encoders + IMU)"]
-        WHEEL_EKF -->|Motion Prior / Initial Guess| ICP
+        WHEEL_ODOM["/odom/wheel<br>(Mecanum Wheel Odometry)"]
+        WHEEL_ODOM -->|Motion Prior / Initial Guess| ICP
         ICP_ODOM["/icp/odom<br>(nav_msgs/Odometry with 6x6 Covariance)"]
         ICP --> ICP_ODOM
-        ICP_ODOM --> ROBOT_LOC["robot_localization / Nav2<br>(Global State Estimation)"]
+        WHEEL_ODOM --> ROBOT_LOC["robot_localization (EKF) + Nav2<br>(/odometry/filtered)"]
+        ICP_ODOM --> ROBOT_LOC
         ICP -->|/icp/save_submap| MAP_FILE["map_output.ply / map_output.xyz<br>(Publication-Grade 3D Maps)"]
     end
 ```
@@ -86,20 +87,29 @@ flowchart TD
 
 ```text
 .
+├── benchmarks/                       # CPU, thermal, and stack performance benchmark logs
+├── docs/
+│   └── proximos_passos_engenharia.md # Engineering roadmap and next milestones
 ├── firmware/
 │   └── esp32_firmware/               # ESP-IDF micro-ROS firmware for ESP32 & ESP32-P4
-│       ├── main/                     # micro-ROS node (Heartbeat pub, LED sub, auto-reconnect)
+│       ├── main/                     # micro-ROS node (encoders, IMU, steppers, /odom/raw)
 │       ├── launch/                   # micro_ros_agent.launch.py for ROS 2 Humble
 │       └── scripts/                  # Automated setup, udev rules, and flashing scripts
-│
+├── holodex_bringup/                  # Central integration package (TUI orchestrator, URDF, EKF, Nav2)
+│   ├── config/                       # nav2_params.yaml, supervisor.yaml
+│   ├── holodex_bringup/              # holodex_orchestrator Python TUI & supervisor
+│   ├── launch/                       # robot.launch.py, navigation.launch.py, full_system.launch.py
+│   └── urdf/                         # Robot URDF/Xacro description
+├── mecanum_wheel_odometry/           # 4WD Mecanum forward kinematics wheel odometry & EKF launch
+│   ├── config/                       # EKF and wheel odometry parameters
+│   ├── launch/                       # Base fusion and wheel odometry launch files
+│   └── src/                          # C++ wheel odometry node
 ├── Models/
 │   └── yolov8n_seg_final.nb          # Compiled INT8 network binary for VeriSilicon VIP9000 NPU
-│
 ├── ORBBEC-ASTRA-PRO/
 │   ├── README.md                     # Camera setup, OpenNI2 driver, and UVC configurations
 │   ├── orbbec_ws/                    # ROS 2 workspace containing astra_camera packages
-│   └── scripts/                      # Camera startup, diagnostic, and build scripts
-│
+│   └── scripts/                      # Camera startup, udev setup, diagnostic, and build scripts
 ├── pointcloud_odometry/
 │   ├── CMakeLists.txt                # Build configuration with OpenMP and ROS 2 components
 │   ├── package.xml                   # Package dependencies
@@ -118,7 +128,6 @@ flowchart TD
 │   │   ├── pointcloud_filter_component.cpp # Fast 2D pixel-striding filter
 │   │   └── pointcloud_filter_node.cpp    # Standalone filter executable
 │   └── third_party/small_gicp/       # High-efficiency GICP/VGICP C++ header-only library
-│
 ├── yolo_seg_ros2/
 │   ├── CMakeLists.txt                # VIPLite + OpenCV + ROS 2 build recipe
 │   ├── package.xml                   # Package manifest
@@ -129,7 +138,6 @@ flowchart TD
 │   │   └── run_yolov8_inference.sh   # Standalone inference & validation script
 │   └── src/
 │       └── yolo_seg_node.cpp         # NPU inference, DFL box decoding, and mask matmul
-│
 ├── GEMINI.md                         # Detailed engineering log, pitfalls, and future roadmap
 └── README.md                         # This file
 ```
@@ -181,42 +189,83 @@ Benchmarked directly on the **Orange Pi 4 Pro** (8-core ARM, 1.8 GHz, Linux Ubun
 
 ---
 
-## 5. Quick Start & Setup
+## 5. Fresh Installation on Orange Pi 4 Pro
 
-### Prerequisites
-On the target machine (Orange Pi 4 Pro or x86 Host with ROS 2 Humble):
+Follow these steps to set up the full robot stack from scratch on a new **Orange Pi 4 Pro** running **Ubuntu 22.04 LTS** with **ROS 2 Humble** installed (`/opt/ros/humble`).
+
+### Step 1: Install System & ROS 2 Dependencies
 ```bash
-# 1. Install ROS 2 Humble base and build dependencies
 sudo apt-get update && sudo apt-get install -y \
+    git \
+    python3-colcon-common-extensions \
     ros-humble-rclcpp \
     ros-humble-rclcpp-components \
+    ros-humble-rclpy \
+    ros-humble-std-msgs \
+    ros-humble-std-srvs \
     ros-humble-sensor-msgs \
     ros-humble-nav-msgs \
     ros-humble-geometry-msgs \
     ros-humble-tf2-ros \
+    ros-humble-tf2-geometry-msgs \
     ros-humble-tf2-eigen \
     ros-humble-cv-bridge \
+    ros-humble-robot-state-publisher \
+    ros-humble-robot-localization \
+    ros-humble-imu-filter-madgwick \
+    ros-humble-navigation2 \
+    ros-humble-nav2-bringup \
     libopencv-dev \
     libomp-dev \
     libeigen3-dev
 ```
 
-### Building the Packages
+### Step 2: Clone the Repository
 ```bash
-# 1. Navigate to your ROS 2 workspace
+cd ~
+git clone https://github.com/verlab/holodex.git ~/orange
+```
+
+### Step 3: Set Up the Orbbec Astra Pro Camera (`~/orb`)
+Install the Orbbec USB udev rules, add your user to the `video` group, and build the camera workspace:
+```bash
+cd ~/orange/ORBBEC-ASTRA-PRO
+./scripts/setup_host.sh
+./scripts/build.sh
+ln -s ~/orange/ORBBEC-ASTRA-PRO ~/orb
+```
+*(Log out and back in if `setup_host.sh` added your user to the `video` group, then replug the Astra Pro USB cable.)*
+
+### Step 4: Set Up ESP32 Serial Rules & `micro_ros_agent`
+Install the persistent `/dev/esp32` udev rule and build `micro_ros_agent` into `~/ros2_ws`:
+```bash
+sudo cp ~/orange/firmware/esp32_firmware/scripts/99-esp32.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG dialout "$USER"
+
+~/orange/firmware/esp32_firmware/scripts/build_micro_ros_agent.sh
+```
+*(Optional: if you also need to build/flash the ESP32 firmware from this machine, use `firmware/esp32_firmware/scripts/setup_esp_idf.sh` and `flash_esp32.sh`.)*
+
+### Step 5: Build the Main ROS 2 Workspace (`~/ros2_ws`)
+Link the core robot packages into `~/ros2_ws/src` and compile in `Release` mode:
+```bash
 mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+ln -s ~/orange/holodex_bringup holodex_bringup
+ln -s ~/orange/mecanum_wheel_odometry mecanum_wheel_odometry
+ln -s ~/orange/pointcloud_odometry pointcloud_odometry
 
-# 2. Clone or link this repository
-ln -s /path/to/orange/pointcloud_odometry pointcloud_odometry
+# Optional: only on Orange Pi 4 Pro with VIPLite NPU drivers (/lib/libVIPhal.so, /lib/libNBGlinker.so)
+# ln -s ~/orange/yolo_seg_ros2 yolo_seg_ros2
 
-# 3. Build with Release optimization
 cd ~/ros2_ws
-colcon build --packages-select pointcloud_odometry \
+source /opt/ros/humble/setup.bash
+colcon build --packages-select holodex_bringup mecanum_wheel_odometry pointcloud_odometry \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-# 4. Source the overlay
 source ~/ros2_ws/install/setup.bash
 ```
+*(Tip: add `source /opt/ros/humble/setup.bash` and `source ~/ros2_ws/install/setup.bash` to `~/.bashrc` for convenience.)*
 
 ---
 
